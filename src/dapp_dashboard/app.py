@@ -33,8 +33,8 @@ from dapp.auth import Heimdall, IdentityUnavailable, token_from_headers
 from dapp.client import DataOS, DataOSError
 from dapp.config import Context, load_context
 from dapp.ctl import ApiWriter
-from dapp.platform import ID_RE, Platform, PlatformError, gateway_internal_url
-from dapp.usage import GatewayUsage, Prometheus, observability_url
+from dapp.platform import ID_RE, Platform, PlatformError, gateway_internal_url, gateway_public_url
+from dapp.usage import GatewayError, GatewayUsage, Prometheus, observability_url
 from dapp_login import SCOPES, Login, Settings
 
 log = logging.getLogger("dapp.dashboard")
@@ -521,6 +521,50 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         dest = back_to if back_to.startswith("/") and not back_to.startswith("//") else "/keys"
         return _act(request, dest, lambda: platform_for(s).revoke_llm_key(app, prefix), f"Revoked key {prefix}…")
 
+    # ------------------------------------------------------------------ MCP tools
+    @api.get("/tools", response_class=HTMLResponse)
+    def tools(request: Request, days: int = 30):
+        s = need(request)
+        g = gateway_for(s)
+        listed = _safe(lambda: g.list_tools(s.tenant))
+        mine = [t["name"] for t in listed if t.get("mine")] if isinstance(listed, list) else []
+        usage = by_fn = None
+        if mine:
+            usage = _safe(lambda: g.tool_usage(tool=None, tenant=s.tenant, since_hours=days * 24,
+                                               group_by="tool,caller"))
+            by_fn = _safe(lambda: g.tool_usage(tool=None, tenant=s.tenant, since_hours=days * 24,
+                                               group_by="tool,tool_name"))
+        return render(request, "tools.html", s, tools=listed, usage=usage, by_fn=by_fn, days=days,
+                      gateway_url=gateway_public_url(Context("d", fqdn, s.tenant)))
+
+    @api.post("/tools/{name}/allow")
+    def tool_allow(request: Request, name: str, users: str = Form(""), apps: str = Form(""),
+                   everyone: str = Form(""), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        try:
+            who = split_ids_field(users) + [f"app:{a}" for a in split_ids_field(apps)] + (["*"] if everyone else [])
+        except ValueError as e:
+            return back(request, "/tools", err=str(e))
+        if not who:
+            return back(request, "/tools", err="Type a user, an app, or tick everyone")
+        return _act(request, "/tools", lambda: platform_for(s).tool_allow(name, who),
+                    f"{name}: allowed {', '.join(who)}")
+
+    @api.post("/tools/{name}/deny")
+    def tool_deny(request: Request, name: str, value: str = Form(...), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        return _act(request, "/tools", lambda: platform_for(s).tool_deny(name, [value]), f"{name}: removed {value}")
+
+    @api.post("/tools/{name}/delete")
+    def tool_delete(request: Request, name: str, confirm: str = Form(""), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        if confirm != name:
+            return back(request, "/tools", err=f"Type {name} to confirm")
+        return _act(request, "/tools", lambda: platform_for(s).delete_tool(name), f"Removed tool {name}")
+
     # ------------------------------------------------------------------ JSON API (CLI / agents)
     @api.get("/api/apps")
     def api_apps(request: Request, all: bool = False):
@@ -549,7 +593,7 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
     def _act(request: Request, path: str, fn, ok: str) -> RedirectResponse:
         try:
             fn()
-        except (DataOSError, PlatformError, ValueError) as e:
+        except (DataOSError, PlatformError, GatewayError, ValueError) as e:
             return back(request, path, err=str(e))
         return back(request, path, msg=ok)
 

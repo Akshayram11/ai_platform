@@ -11,7 +11,7 @@
 name: chatbot
 title: DataOS Chatbot
 description: OpenAI chatbot deployed with dapp
-image: docker.io/tmdcio/dapp-chatbot:0.1.6   # docker build -f examples/chatbot/Dockerfile -t docker.io/tmdcio/dapp-chatbot:0.1.6 .
+image: docker.io/tmdcio/dapp-chatbot:0.1.9   # docker build -f examples/chatbot/Dockerfile -t docker.io/tmdcio/dapp-chatbot:0.1.9 .
 port: 8080
 command: [sh, -c, "uvicorn app:app --host 0.0.0.0 --port 8080 --proxy-headers"]
 compute: runnable-default

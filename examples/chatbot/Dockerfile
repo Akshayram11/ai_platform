@@ -4,7 +4,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY examples/chatbot/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY examples/chatbot/app.py examples/chatbot/index.html src/dapp_login.py src/dapp_metrics.py ./
+COPY examples/chatbot/app.py examples/chatbot/mcp_tools.py examples/chatbot/index.html src/dapp_login.py src/dapp_metrics.py ./
 RUN useradd --uid 10001 app
 USER 10001
 ENV PORT=8080 PYTHONUNBUFFERED=1

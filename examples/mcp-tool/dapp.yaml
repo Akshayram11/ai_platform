@@ -1,0 +1,25 @@
+# demo-tools: an MCP server that only the dapp gateway can call.
+#
+#   export TOOL_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+#   printf 'TOOL_TOKEN=%s\n' "$TOOL_TOKEN" > examples/mcp-tool/.env       # gitignored
+#   dapp secret set demo-tools token --from-env-file examples/mcp-tool/.env --no-attach   # the server checks it...
+#   dapp deploy -f examples/mcp-tool/dapp.yaml
+#   dapp tool add demo-tools --url http://demo-tools:8080/mcp --auth-env TOOL_TOKEN \
+#        -d "time zones, arithmetic, text stats"                          # ...and only the gateway holds it
+#   (the gateway needs DAPP_TOOL_INTERNAL_HOSTS=demo-tools to call a plain-http in-cluster host)
+#   dapp tool allow demo-tools "*"                                        # every DataOS user may use it
+#   dapp tool connect demo-tools                                          # add it to your Claude Code
+name: demo-tools
+title: Demo MCP tools
+description: Small MCP server behind the dapp gateway
+image: docker.io/tmdcio/dapp-demo-tools:0.1.0
+port: 8080
+command: [python, server.py]
+compute: engineering-compute
+hostname: demo-tools          # the gateway reaches it in-cluster at http://demo-tools:8080/mcp
+path: /demo-tools
+public: true                  # no DataOS sign-in on the server itself: it refuses every call without TOOL_TOKEN
+resources: {cpu: 50m, memory: 128Mi, cpuLimit: 500m, memoryLimit: 256Mi}
+secrets: [dapp-demo-tools-token]
+env:
+  TOOL_ALLOWED_HOSTS: demo-tools:8080,demo-tools

@@ -1,0 +1,25 @@
+# A data chatbot: the chatbot image plus the DataOS Data Product MCP, through the dapp gateway.
+#   dapp deploy -f examples/chatbot/data.dapp.yaml
+# The tool must exist in the gateway first (dapp tool ls). If you own it, deploy also allows this app on it;
+# otherwise its owner runs: dapp tool allow dataproduct-mcp app:data-chatbot
+# Whoever may open this app gets what the tool's stored credential can see: keep `access.users` to people who should.
+name: data-chatbot
+title: DataOS Data Chatbot
+description: Ask about DataOS data products; uses the Data Product MCP via the dapp gateway
+image: docker.io/tmdcio/dapp-chatbot:0.1.9
+port: 8080
+command: [sh, -c, "uvicorn app:app --host 0.0.0.0 --port 8080 --proxy-headers"]
+compute: engineering-compute
+path: /data-chatbot
+resources: {cpu: 100m, memory: 192Mi, cpuLimit: 500m, memoryLimit: 384Mi}
+llm: true
+metrics: true
+tools: [dataproduct-mcp]
+env:
+  ROOT_PATH: /data-chatbot
+  OPENAI_MODEL: gpt-6-luna
+  OPENAI_REASONING_EFFORT: low
+  SYSTEM_PROMPT: >-
+    You are a data assistant on DataOS (tenant engineering). Answer questions about data products using the
+    tools: find products with search, read their metadata and semantic schema, and query them with
+    vulcan_query_submit then vulcan_query_result. Say which data product and measures you used. Be concise.

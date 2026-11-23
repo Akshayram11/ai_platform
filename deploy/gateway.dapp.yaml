@@ -1,10 +1,10 @@
-# The dapp LLM gateway, deployed as a DataOS app with dapp itself:
+# The dapp gateway (LLM calls and MCP tools), deployed as a DataOS app with dapp itself:
 #   dapp secret apply deploy/secrets/dapp-gateway-providers.yaml --env-file .env.gateway   # the provider keys
 #   dapp deploy -f deploy/gateway.dapp.yaml
 # .env.gateway (gitignored): OPENAI_API_KEY=..., optionally ANTHROPIC_API_KEY=..., DATABASE_URL=postgresql+psycopg://...
 name: dapp-llm-gateway          # DataOS names the workload from the app's creation; never toggle stateful/disk on a live app (see README)
 description: LLM gateway for DataOS apps; meters tokens per app
-image: docker.io/tmdcio/dataos-apps:0.1.12
+image: docker.io/tmdcio/dataos-apps:0.1.15
 command: [dapp-gateway]
 port: 8080
 compute: engineering-compute
@@ -19,6 +19,8 @@ env:
   ROOT_PATH: /dapp-gateway
   DATAOS_FQDN: poliks.instance.dataos.cloud
   DATABASE_URL: sqlite:////data/gateway.db     # overridden by the secret when it sets DATABASE_URL
+  # MCP tools: plain-http in-cluster hosts the gateway may proxy to (everything else must be public https)
+  DAPP_TOOL_INTERNAL_HOSTS: demo-tools
   # DAPP_GATEWAY_ADMINS: alice,bob             # may see everyone's usage
   # USD per 1M tokens, from OpenAI's model pages (gpt-6-luna: input 0.10, cached 0.01, cache write 0.125, output 0.50;
   # gpt-4o-mini: input 0.15, cached 0.075, output 0.60). Prompts over 272K tokens cost 2x on gpt-6-luna; not modelled.
@@ -28,3 +30,8 @@ disk:                           # app keys and usage survive restarts and redepl
   mountPath: /data
 secrets:
   - dapp-gateway-providers
+  # DAPP_GATEWAY_SECRET_KEY: encrypts MCP tool credentials stored in the gateway. Losing it makes stored tool
+  # credentials unreadable (re-run `dapp tool add ... --auth-env`). Create it once:
+  #   python3 -c "from cryptography.fernet import Fernet; print('DAPP_GATEWAY_SECRET_KEY='+Fernet.generate_key().decode())" > .env.gateway-tools
+  #   dapp secret set dapp-llm-gateway dapp-gateway-tools --from-env-file .env.gateway-tools --no-attach
+  - dapp-gateway-tools

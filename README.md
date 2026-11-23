@@ -95,6 +95,7 @@ dapp access revoke GRANT
 dapp keys ls|create NAME|rm NAME [--force]     # DataOS API keys (names: letters, digits, _)
 dapp llm-key ls | rotate APP | revoke APP PREFIX   # per-app LLM gateway keys
 dapp usage [APP]
+dapp tool ls | add NAME --url U [--auth-env VAR] | allow NAME WHO… | deny NAME WHO… | usage | connect NAME | rm NAME
 dapp mcp                 # MCP server over stdio
 ```
 
@@ -140,6 +141,36 @@ developer needs besides logging in (create resources, use the compute, read thei
 app's `dapp-<app>-llm` secret holds only `DAPP_LLM_KEY`. The gateway holds the real provider keys and meters tokens
 and cost per app.
 
+## MCP tools through the gateway (`dapp tool`)
+
+Any MCP server (Streamable HTTP) can be put behind the gateway. People and apps then use it at
+`https://<fqdn>/dapp-gateway/mcp/<tenant>/<tool>`, and the gateway:
+
+- checks who is calling: a DataOS user (token or API key, via Heimdall) or a dapp app (its gateway key);
+- checks the tool's allow list: the owner always, `"*"` = every signed-in DataOS user, `app:<name>` = one app;
+- injects the tool's own credential, stored encrypted in the gateway (`DAPP_GATEWAY_SECRET_KEY`): the people and
+  apps using the tool never see it, and the MCP server refuses calls that don't come through the gateway;
+- tells the tool who is calling (`x-dapp-user`) and records every call: who, which function, failed or not.
+
+```bash
+dapp tool add jira --url https://mcp.example.com/mcp --auth-env JIRA_TOKEN -d "Jira tickets"  # bare token = Bearer
+dapp tool allow jira "*"                 # or: alice bob@corp.io app:chatbot
+dapp tool connect jira                   # adds it to Claude Code (runs `dapp tool bridge`, signs with your login)
+dapp tool usage --by caller,tool_name    # who called which function
+```
+
+**Apps using tools.** Add `tools: [dataproduct-mcp]` (with `llm: true`) to an app's dapp.yaml. dapp gives the app
+`DAPP_TOOLS` and `DAPP_TOOLS_URL`, and allows `app:<name>` on each tool you own. The app calls the tool with its
+gateway key, and never sees the tool's credential. `examples/chatbot` does this: with tools set, the model calls them
+(OpenAI function calling) and the chat shows each call. `examples/chatbot/data.dapp.yaml` is a data chatbot on the
+DataOS Data Product MCP. Everyone allowed to open such an app acts with the tool's stored credential, so keep its
+`access.users` to people who should see that data.
+
+`examples/mcp-tool` is a small server deployed this way (`demo-tools`: calculate, time_in, text_stats); its
+dapp.yaml lists the steps. Tool URLs must be public https; plain http and private addresses only for hosts in the
+gateway's `DAPP_TOOL_INTERNAL_HOSTS` (e.g. `demo-tools`, reached in-cluster). The dashboard's **Tools** page shows
+your tools, who may use them (add/remove there too) and their calls.
+
 ## Secrets as YAML (`deploy/secrets/`)
 
 | File | Who creates it | Holds |
@@ -182,7 +213,7 @@ helper show "no data". Series are prefixed `dapp_` and carry a `pod` label so re
 ## Running the platform pieces
 
 ```bash
-docker build -t <registry>/dataos-apps:0.1.12 .
+docker build -t <registry>/dataos-apps:0.1.15 .
 # fill the REPLACE_ME values, then:
 dapp deploy -f deploy/gateway.dapp.yaml
 dapp deploy -f deploy/dashboard.dapp.yaml     # → https://<fqdn>/dapp/

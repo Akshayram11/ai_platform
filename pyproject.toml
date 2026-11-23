@@ -14,7 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.2"]
-gateway = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "sqlalchemy>=2.0"]
+gateway = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "sqlalchemy>=2.0", "cryptography>=42"]
 dashboard = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "jinja2>=3.1", "python-multipart>=0.0.9"]
 all = ["dataos-apps[mcp,gateway,dashboard]"]
 

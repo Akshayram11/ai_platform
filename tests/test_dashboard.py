@@ -198,6 +198,18 @@ class FakePlatform:
     def list_keys(self):
         return [{"name": "mine", "type": "apikey", "expiration": "2026-12-20T00:00:00Z", "description": "ci", "system": False}]
 
+    def tool_allow(self, name, who):
+        self.calls.append(("tool_allow", name, who))
+        return {"allow": who}
+
+    def tool_deny(self, name, who):
+        self.calls.append(("tool_deny", name, who))
+        return {"allow": []}
+
+    def delete_tool(self, name):
+        self.calls.append(("delete_tool", name))
+        return {"deleted": 1}
+
 
 class FakeGateway:
     def summary(self, app=None, since_hours=720, group_by="app,model"):
@@ -210,6 +222,20 @@ class FakeGateway:
     def list_keys(self):
         return [{"prefix": "dapp_NEW", "tenant": "engineering", "app": "chatbot", "owner": "alice",
                  "created": "2026-11-23T08:01:19.279926", "revoked": False}]
+
+    def list_tools(self, tenant=None):
+        return [{"name": "demo-tools", "owner": "alice", "mine": True, "has_auth": True, "description": "math",
+                 "url": "http://demo-tools:8080/mcp", "allow": ["*", "app:chatbot", "bob"],
+                 "endpoint": "/mcp/engineering/demo-tools"},
+                {"name": "jira", "owner": "bob", "mine": False, "has_auth": True, "description": "tickets",
+                 "endpoint": "/mcp/engineering/jira"}]
+
+    def tool_usage(self, tool=None, tenant=None, since_hours=720, group_by="tool,caller"):
+        cols = group_by.split(",")
+        row = {"tool": "demo-tools", "caller": "carol", "tool_name": "calculate", "calls": 4, "errors": 1,
+               "avg_latency_ms": 12}
+        return {"rows": [{k: v for k, v in row.items() if k in cols or k in ("calls", "errors", "avg_latency_ms")}],
+                "total": {"calls": 4, "errors": 1}}
 
 
 class FakeProm:
@@ -260,3 +286,43 @@ def test_every_page_loads_through_the_real_routes(monkeypatch):
     assert c.get("/apps/chatbot?tab=llm&days=7").status_code == 200
     assert c.get("/apps/missing").status_code == 404                         # unknown app: a clean 404, not a 500
     assert c.get("/api/apps").json()[0]["access"]["mode"] == "login"
+
+    tools = c.get("/tools")
+    assert tools.status_code == 200, tools.text[:300]
+    for needle in ("demo-tools", "every signed-in DataOS user", "app:chatbot", "dapp tool connect jira",
+                   "shared with you", "calculate", "4 calls, 1 errors"):
+        assert needle in tools.text, needle
+    assert "http://demo-tools:8080/mcp" in tools.text and tools.text.count("Upstream:") == 1  # only for your own tool
+
+
+def test_tool_actions_from_the_dashboard(monkeypatch):
+    from urllib.parse import parse_qs, urlparse
+
+    fake = FakePlatform()
+    monkeypatch.setenv("DATAOS_FQDN", "x.dataos.cloud")
+    monkeypatch.setenv("DATAOS_TENANT_ID", "engineering")
+    for v in ("DAPP_DEV", "DAPP_PROMETHEUS_URL", "DAPP_OIDC_ISSUER", "DAPP_OIDC_CLIENT_ID", "clientSecret"):
+        monkeypatch.delenv(v, raising=False)
+    app = create_app(heimdall=FakeHeimdall(), login=FakeLogin(), platform_factory=lambda s, t=None: fake,
+                     gateway_factory=lambda s: FakeGateway(), prom_factory=lambda s: FakeProm())
+    c = TestClient(app, base_url="https://testserver")
+    c.get("/login", follow_redirects=False)
+    c.get("/_dapp/callback?code=good-code&state=st1", follow_redirects=False)
+    import re as _re
+    csrf = _re.search(r'name="csrf" value="([^"]+)"', c.get("/tools").text).group(1)
+
+    def post(path, **form):
+        r = c.post(path, data={"csrf": csrf, **form}, follow_redirects=False)
+        return parse_qs(urlparse(r.headers["location"]).query)
+
+    assert "allowed" in post("/tools/demo-tools/allow", users="carol", apps="chatbot", everyone="1")["msg"][0]
+    assert fake.calls[-1] == ("tool_allow", "demo-tools", ["carol", "app:chatbot", "*"])
+    assert "not a valid id" in post("/tools/demo-tools/allow", users="no way!")["err"][0]   # no 500
+    assert "Type a user" in post("/tools/demo-tools/allow")["err"][0]
+    post("/tools/demo-tools/deny", value="app:chatbot")
+    assert fake.calls[-1] == ("tool_deny", "demo-tools", ["app:chatbot"])
+    assert "to confirm" in post("/tools/demo-tools/delete", confirm="nope")["err"][0]
+    post("/tools/demo-tools/delete", confirm="demo-tools")
+    assert fake.calls[-1] == ("delete_tool", "demo-tools")
+    assert c.post("/tools/demo-tools/delete", data={"csrf": "bad", "confirm": "demo-tools"},
+                  follow_redirects=False).status_code == 403

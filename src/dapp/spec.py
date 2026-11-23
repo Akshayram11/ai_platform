@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 DAPP_TAG = "dapp"
 NAME_RE = re.compile(r"^[a-z]([a-z0-9-]{0,46}[a-z0-9])?$")
@@ -152,6 +152,8 @@ class AppSpec(BaseModel):
     access: Access = Field(default_factory=Access)
     llm: bool = Field(False, description="Route LLM calls through the dapp gateway and meter tokens")
     metrics: bool = Field(False, description="The app runs dapp_metrics, so DataOS scrapes its CPU/memory (port 9102)")
+    tools: list[str] = Field(default_factory=list,
+                             description="Gateway MCP tools the app may call (needs llm: true: it uses its gateway key)")
     owners: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     working_dirs: list[WorkingDir] = Field(default_factory=list, alias="workingDirs")
@@ -173,6 +175,20 @@ class AppSpec(BaseModel):
         if clash:
             raise ValueError(f"env {', '.join(clash)} is set by DataOS for every app; remove it from dapp.yaml")
         return v
+
+    @field_validator("tools")
+    @classmethod
+    def _tools(cls, v: list[str]) -> list[str]:
+        bad = [t for t in v if not re.match(r"^[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?$", t)]
+        if bad:
+            raise ValueError(f"tool names are lower-case letters, digits and '-': {', '.join(bad)}")
+        return v
+
+    @model_validator(mode="after")
+    def _tools_need_llm(self) -> AppSpec:
+        if self.tools and not self.llm:
+            raise ValueError("tools: needs llm: true (the app calls tools with its gateway key)")
+        return self
 
     @field_validator("port")
     @classmethod

@@ -116,3 +116,39 @@ class GatewayUsage:
         r = self.http.delete(f"/admin/keys/{tenant}/{app}")
         r.raise_for_status()
         return r.json()
+
+    # ---- MCP tools
+    def _tool_call(self, method: str, path: str, **kw) -> Any:
+        """Gateway errors come back as {error: {message}}; surface that text instead of a bare HTTP status."""
+        r = self.http.request(method, path, **kw)
+        if r.status_code >= 400:
+            try:
+                msg = r.json()["error"]["message"]
+            except (ValueError, KeyError, TypeError):
+                msg = r.text[:300]
+            raise GatewayError(f"gateway: {msg} (HTTP {r.status_code})")
+        return r.json()
+
+    def list_tools(self, tenant: str | None = None) -> list[dict[str, Any]]:
+        return self._tool_call("GET", "/admin/tools", params={"tenant": tenant} if tenant else None)
+
+    def get_tool(self, tenant: str, name: str) -> dict[str, Any]:
+        return self._tool_call("GET", f"/admin/tools/{tenant}/{name}")
+
+    def save_tool(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self._tool_call("POST", "/admin/tools", json=body)
+
+    def delete_tool(self, tenant: str, name: str) -> dict[str, Any]:
+        return self._tool_call("DELETE", f"/admin/tools/{tenant}/{name}")
+
+    def tool_access(self, tenant: str, name: str, allow: list[str], deny: list[str]) -> dict[str, Any]:
+        return self._tool_call("POST", f"/admin/tools/{tenant}/{name}/access", json={"allow": allow, "deny": deny})
+
+    def tool_usage(self, *, tool: str | None, tenant: str | None, since_hours: int, group_by: str) -> dict[str, Any]:
+        params: dict[str, Any] = {"since_hours": since_hours, "group_by": group_by}
+        params.update({k: v for k, v in (("tool", tool), ("tenant", tenant)) if v})
+        return self._tool_call("GET", "/admin/tool-usage", params=params)
+
+
+class GatewayError(RuntimeError):
+    pass

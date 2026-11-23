@@ -8,6 +8,8 @@ Apps call it instead of the provider (dapp sets ANTHROPIC_BASE_URL / OPENAI_BASE
 The app authenticates with its dapp key (x-api-key or Bearer); the gateway swaps in the real provider key
 (from a DataOS secret) and records tokens per tenant/app/owner/model.
 
+MCP tools: /mcp/<tenant>/<tool> proxies a registered MCP server (see tools.py).
+
 Admin API (callers authenticate with their DataOS token/API key, verified by Heimdall):
     POST   /admin/keys                 {app, tenant, rotate}  -> {key}   issue an app key
     DELETE /admin/keys/{tenant}/{app}                                    revoke an app's keys
@@ -35,6 +37,7 @@ from dapp.config import Context
 
 from .meter import Meter
 from .store import GROUPABLE, AppKey, Pricing, Store
+from .tools import Vault, mount_tools
 
 log = logging.getLogger("dapp.gateway")
 
@@ -70,7 +73,7 @@ class KeyRequest(BaseModel):
 
 def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
                upstream_transport: httpx.AsyncBaseTransport | None = None,
-               dataos_transport: httpx.BaseTransport | None = None) -> FastAPI:
+               dataos_transport: httpx.BaseTransport | None = None, vault: Vault | None = None) -> FastAPI:
     fqdn = os.environ.get("DATAOS_FQDN", "")
     store = store or Store()
     heimdall = heimdall or (Heimdall(f"https://{fqdn}") if fqdn else None)
@@ -135,6 +138,7 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
                 "anthropic": f"{base}/anthropic/v1/...  (apps use this via ANTHROPIC_BASE_URL)",
                 "usage": f"{base}/admin/usage  (DataOS sign-in token or API key)",
                 "keys": f"{base}/admin/keys  (DataOS sign-in token or API key)",
+                "tools": f"{base}/mcp/<tenant>/<tool>  (MCP tools: DataOS token/API key or a dapp app key)",
             },
             "dashboard": f"{base.rsplit('/', 1)[0]}/dapp/",
         }
@@ -291,6 +295,9 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
     @api.api_route("/openai/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
     async def openai(path: str, request: Request, key: AppKey = Depends(app_key)) -> Response:
         return await proxy("openai", path, request, key)
+
+    mount_tools(api, store=store, heimdall=heimdall, caller=caller, admins=admins, upstream=upstream,
+                clean_user=clean_user, vault=vault)
 
     @api.exception_handler(HTTPException)
     async def _http_exc(_: Request, exc: HTTPException) -> JSONResponse:

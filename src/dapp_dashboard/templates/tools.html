@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Tools · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% block body %}
+<h1>Tools</h1>
+<p class="sub">MCP servers behind the gateway. Agents and apps call <code>{{ gateway_url }}/mcp/{{ s.tenant }}/&lt;tool&gt;</code>;
+the gateway checks who they are, adds the tool's own credential (nobody else ever sees it) and records every call.</p>
+
+{% if tools is mapping and tools.error %}
+<div class="panel"><div class="muted">Gateway not reachable: {{ tools.error }}</div></div>
+{% elif not tools %}
+<div class="panel"><div class="empty">No tools you own or may use yet. Register one from your terminal:
+<pre>dapp tool add NAME --url https://host/mcp --auth-env TOKEN_VAR -d "what it does"
+dapp tool allow NAME "*"            # every DataOS user
+dapp tool connect NAME              # add it to Claude Code</pre></div></div>
+{% else %}
+{% for t in tools %}
+<div class="panel">
+  <div class="row" style="justify-content:space-between;align-items:center">
+    <div><b>{{ t.name }}</b> <span class="muted">· owner {{ t.owner }}{% if t.has_auth %} · credential stored{% endif %}</span>
+      <div class="muted">{{ t.description }}</div></div>
+    {% if t.mine %}<span class="pill ok">yours</span>{% else %}<span class="pill">shared with you</span>{% endif %}
+  </div>
+  <p class="muted" style="margin:10px 0 4px">Use it in Claude Code:</p>
+  <pre>dapp tool connect {{ t.name }}</pre>
+  {% if t.mine %}
+  <p class="muted" style="margin:10px 0 4px">Upstream: <code>{{ t.url }}</code></p>
+  <h3 style="margin:14px 0 6px">Who can use it</h3>
+  <table><tbody>
+    <tr><td><code>{{ t.owner }}</code></td><td class="muted">owner, always</td><td></td></tr>
+    {% for a in t.allow %}
+    <tr><td><code>{{ a }}</code></td>
+      <td class="muted">{% if a == '*' %}every signed-in DataOS user{% elif a.startswith('app:') %}an app (calls with its gateway key){% else %}user{% endif %}</td>
+      <td><form class="inline" method="post" action="{{ root }}/tools/{{ t.name }}/deny">
+        <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="value" value="{{ a }}">
+        <button class="danger">Remove</button></form></td></tr>
+    {% endfor %}
+  </tbody></table>
+  <form class="row" method="post" action="{{ root }}/tools/{{ t.name }}/allow" style="margin-top:10px">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <label>Users<input name="users" placeholder="user id or email, comma separated"></label>
+    <label>Apps<input name="apps" placeholder="chatbot"></label>
+    <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="everyone" value="1"> anyone signed in</label>
+    <button class="primary">Allow</button>
+  </form>
+  <details style="margin-top:12px"><summary class="muted">Remove this tool</summary>
+    <form class="row" method="post" action="{{ root }}/tools/{{ t.name }}/delete" style="margin-top:8px">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}">
+      <label>Type <b>{{ t.name }}</b> to confirm<input name="confirm" autocomplete="off"></label>
+      <button class="danger">Remove tool</button>
+    </form>
+    <p class="muted">The MCP server keeps running; the gateway just stops serving it.</p>
+  </details>
+  {% endif %}
+</div>
+{% endfor %}
+{% endif %}
+
+{% if usage %}
+<h2>Calls to your tools · last {{ days }} days</h2>
+{% if usage is mapping and usage.error %}<div class="panel"><div class="muted">{{ usage.error }}</div></div>
+{% else %}
+<div class="panel">
+  <table><thead><tr><th>Tool</th><th>Who</th><th>Calls</th><th>Errors</th><th>Avg latency</th></tr></thead><tbody>
+  {% for r in usage.rows %}<tr><td>{{ r.tool }}</td><td><code>{{ r.caller }}</code></td><td>{{ r.calls }}</td>
+    <td>{% if r.errors %}<span class="pill bad">{{ r.errors }}</span>{% else %}0{% endif %}</td><td>{{ r.avg_latency_ms }} ms</td></tr>
+  {% else %}<tr><td colspan="5" class="empty">No calls yet.</td></tr>{% endfor %}
+  </tbody></table>
+  <p class="muted">Total: {{ usage.total.calls }} calls, {{ usage.total.errors }} errors. A call counts as an error when the tool
+  answered with an error or marked its result as failed.</p>
+</div>
+{% if by_fn and by_fn.rows %}
+<div class="panel"><table><thead><tr><th>Tool</th><th>Function</th><th>Calls</th><th>Errors</th></tr></thead><tbody>
+  {% for r in by_fn.rows %}<tr><td>{{ r.tool }}</td><td><code>{{ r.tool_name or '(protocol: list, initialize)' }}</code></td>
+    <td>{{ r.calls }}</td><td>{{ r.errors }}</td></tr>{% endfor %}
+</tbody></table></div>
+{% endif %}
+{% endif %}
+{% endif %}
+{% endblock %}

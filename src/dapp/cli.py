@@ -22,6 +22,7 @@ from .config import ConfigError, current_context_name, list_contexts, load_conte
 from .ctl import WriteError
 from .platform import Platform, PlatformError
 from .spec import AppSpec, dump_yaml, load_spec, wire_manifest
+from .usage import GatewayError
 
 HELP_OPTIONS = {"help_option_names": ["-h", "--help"]}
 
@@ -30,10 +31,12 @@ secret_app = typer.Typer(no_args_is_help=True, help="Manage an app's secrets (va
 access_app = typer.Typer(no_args_is_help=True, help="Control who can use or manage an app.", context_settings=HELP_OPTIONS)
 keys_app = typer.Typer(no_args_is_help=True, help="Your DataOS API keys.", context_settings=HELP_OPTIONS)
 llm_key_app = typer.Typer(no_args_is_help=True, help="LLM gateway keys: the per-app key an app uses to call the LLM.", context_settings=HELP_OPTIONS)
+tool_app = typer.Typer(no_args_is_help=True, help="MCP tools through the gateway: register, share, connect, usage.", context_settings=HELP_OPTIONS)
 app.add_typer(secret_app, name="secret")
 app.add_typer(access_app, name="access")
 app.add_typer(keys_app, name="keys")
 app.add_typer(llm_key_app, name="llm-key")
+app.add_typer(tool_app, name="tool")
 
 console = Console()
 err = Console(stderr=True)
@@ -85,7 +88,7 @@ def _fail(e: Exception) -> None:
 def _run(fn):
     try:
         return fn()
-    except (ConfigError, DataOSError, PlatformError, WriteError, ValueError, FileNotFoundError) as e:
+    except (ConfigError, DataOSError, PlatformError, GatewayError, WriteError, ValueError, FileNotFoundError) as e:
         _fail(e)
 
 
@@ -197,7 +200,7 @@ public: false               # true = skip DataOS login in front of the app
 """
 
 
-CHATBOT_IMAGE = "docker.io/tmdcio/dapp-chatbot:0.1.6"   # public image built from examples/chatbot
+CHATBOT_IMAGE = "docker.io/tmdcio/dapp-chatbot:0.1.9"   # public image built from examples/chatbot
 CHATBOT_TEMPLATE = """\
 # A ready LLM chatbot: private (DataOS sign-in), calls go through the dapp gateway so tokens and cost are counted
 # per person. Nothing to build. Deploy with:  dapp deploy
@@ -561,6 +564,142 @@ def usage(app_name: str | None = typer.Argument(None, metavar="[APP]"),
                 out["compute"] = {"error": str(e)}
         _out(out)
     _run(go)
+
+
+# ---------------------------------------------------------------- tools
+@tool_app.command("ls")
+def tool_ls() -> None:
+    """MCP tools you own or may use in this tenant."""
+    def show(rows):
+        _table([{**r, "mine": "yes" if r.get("mine") else "", "credential": "yes" if r["has_auth"] else ""}
+                for r in rows], ["name", "owner", "mine", "credential", "description"])
+    _run(lambda: _out(_platform().tools(), show))
+
+
+@tool_app.command("add")
+def tool_add(
+    name: str = typer.Argument(..., help="Short name, e.g. jira (lower-case, digits, -)"),
+    url: str = typer.Option(..., "--url", help="The MCP server's Streamable HTTP endpoint, e.g. https://host/mcp"),
+    description: str = typer.Option("", "--description", "-d"),
+    auth_header: str = typer.Option("", "--auth-header", help="Header the tool expects (default Authorization)"),
+    auth_env: str | None = typer.Option(None, "--auth-env", metavar="VAR",
+                                        help="Read the credential from this environment variable. A bare token "
+                                             "is sent as `Authorization: Bearer <token>`"),
+    auth_stdin: bool = typer.Option(False, "--auth-stdin", help="Read the credential value from stdin"),
+    no_auth: bool = typer.Option(False, "--no-auth", help="Remove a stored credential"),
+    allow: list[str] = typer.Option(None, "--allow", help='Who may use it: user id/email, "*", app:<name>'),
+) -> None:
+    """Register an MCP server with the gateway (or update yours). The credential is sent to the gateway once,
+    stored encrypted there, and injected on every call: people and apps using the tool never see it."""
+    def go():
+        value: str | None = None
+        if auth_env:
+            value = os.environ.get(auth_env) or ""
+            if not value:
+                raise PlatformError(f"${auth_env} is empty or unset")
+        elif auth_stdin:
+            value = sys.stdin.read().strip()
+            if not value:
+                raise PlatformError("no credential on stdin")
+        elif no_auth:
+            value = ""
+        r = _platform().save_tool(name, url=url, description=description, auth_header=auth_header,
+                                  auth_value=value, allow=allow or None)
+
+        def show(r):
+            console.print(f"[green]tool {r['name']}[/green]  owner {r['owner']}  credential: "
+                          f"{'stored (encrypted in the gateway)' if r['has_auth'] else 'none'}")
+            console.print(f"allowed: {', '.join(r.get('allow') or []) or 'only you'}")
+            console.print(f"MCP url: {r['mcp_url']}")
+            console.print(f"use it in Claude Code:  dapp tool connect {r['name']}")
+        _out(r, show)
+    _run(go)
+
+
+@tool_app.command("rm")
+def tool_rm(name: str, yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask (agents must pass this)")) -> None:
+    """Unregister a tool you own. Its MCP server keeps running; the gateway just stops serving it."""
+    def go():
+        if not yes:
+            if state.json or not sys.stdin.isatty():
+                raise PlatformError("refusing to remove without --yes")
+            typer.confirm(f"Remove tool {name}? Everyone using it loses access.", abort=True)
+        _out(_platform().delete_tool(name), lambda r: console.print(f"removed {r['tool']}"))
+    _run(go)
+
+
+def _show_tool_access(r):
+    console.print(f"{r['tool']}  owner {r['owner']}\nallowed: {', '.join(r['allow']) or 'only the owner'}")
+
+
+@tool_app.command("allow")
+def tool_allow(name: str, who: list[str] = typer.Argument(..., help='user ids/emails, "*" (every DataOS user) '
+                                                                    'or app:<name> (one of your apps)')) -> None:
+    """Let people or apps use a tool."""
+    _run(lambda: _out(_platform().tool_allow(name, who), _show_tool_access))
+
+
+@tool_app.command("deny")
+def tool_deny(name: str, who: list[str] = typer.Argument(...)) -> None:
+    """Take a tool away from people or apps."""
+    _run(lambda: _out(_platform().tool_deny(name, who), _show_tool_access))
+
+
+@tool_app.command("usage")
+def tool_usage(name: str | None = typer.Argument(None),
+               hours: int = typer.Option(24 * 30, help="Window"),
+               by: str = typer.Option("tool,caller", "--by",
+                                      help="Group by: tool, caller, end_user, method, tool_name, day")) -> None:
+    """Calls to your tools: who called, which function, how many failed. `--by caller,tool_name`."""
+    def go():
+        r = _platform().tool_usage(name, since_hours=hours, group_by=by)
+
+        def show(r):
+            cols = [c for c in by.split(",") if c] + ["calls", "errors", "avg_latency_ms"]
+            _table(r["rows"], cols)
+            console.print(f"total: {r['total']['calls']} calls, {r['total']['errors']} errors")
+        _out(r, show)
+    _run(go)
+
+
+@tool_app.command("connect")
+def tool_connect(
+    name: str,
+    as_name: str | None = typer.Option(None, "--as", help="Name in Claude Code (default: the tool name)"),
+    scope: str = typer.Option("user", help="Claude Code scope: user, project or local"),
+    print_only: bool = typer.Option(False, "--print", help="Only print the command"),
+) -> None:
+    """Add a tool to Claude Code. It runs `dapp tool bridge`, which signs each call with your current DataOS login."""
+    import shutil
+    import subprocess
+
+    def go():
+        p = _platform()
+        p.tool(name)  # fails early if it doesn't exist or you may not use it
+        dapp_bin = shutil.which("dapp") or sys.argv[0]
+        cmd = ["claude", "mcp", "add", "--scope", scope, as_name or name, "--", dapp_bin]
+        if state.context:
+            cmd += ["--context", state.context]
+        cmd += ["tool", "bridge", name]
+        if print_only or not shutil.which("claude"):
+            _out({"command": cmd}, lambda r: console.print(" ".join(r["command"])))
+            return
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            raise PlatformError(f"claude mcp add failed: {(res.stderr or res.stdout).strip()}")
+        _out({"added": as_name or name, "command": cmd},
+             lambda r: console.print(f"added '{r['added']}' to Claude Code; restart Claude Code to use it"))
+    _run(go)
+
+
+@tool_app.command("bridge", hidden=True)
+def tool_bridge(name: str) -> None:
+    """stdio MCP server that forwards to the gateway (what `dapp tool connect` registers)."""
+    from .bridge import run as bridge
+
+    ctx = load_context(state.context, state.tenant)
+    url = Platform(DataOS(ctx)).tool_url(name)
+    bridge(url, lambda: load_context(state.context, state.tenant).auth_headers())
 
 
 # ---------------------------------------------------------------- mcp

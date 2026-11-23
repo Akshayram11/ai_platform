@@ -191,6 +191,11 @@ class Platform:
         if spec.llm:
             spec = spec.model_copy(update={"env": {**llm_env(gateway_internal_url()), **spec.env}})
             notes.append(f"LLM calls are routed via the dapp gateway; key secret: {spec.llm_secret}")
+            if spec.tools:
+                spec = spec.model_copy(update={"env": {
+                    "DAPP_TOOLS": ",".join(spec.tools),
+                    "DAPP_TOOLS_URL": f"{gateway_internal_url()}/mcp/{tenant}", **spec.env}})
+                notes.append(f"MCP tools via the gateway: {', '.join(spec.tools)}")
         if spec.uses_login:
             spec = self._keep_live_access(spec)
             notes.append(f"DataOS sign-in inside the app (dapp_login); allowed: owners + {spec.access.users or '-'}"
@@ -241,6 +246,8 @@ class Platform:
             ))
             plan.notes.append(f"created OIDC client secret {spec.oidc_secret}")
         output = self._write(*manifests, lint=lint)
+        if spec.tools and not lint:
+            plan.notes.extend(self._allow_app_on_tools(spec.name, spec.tools))
         app = manifests[-1]
         return {
             "app": spec.name,
@@ -559,6 +566,62 @@ class Platform:
                   group_by: str = "app,model") -> dict[str, Any]:
         """Tokens and cost. group_by can include end_user: the signed-in people who used the app."""
         return self._gateway().summary(app=app, since_hours=since_hours, group_by=group_by)
+
+    # ---------- MCP tools (through the gateway) ----------
+    def tools(self) -> list[dict[str, Any]]:
+        """Tools you own or may use, in this tenant."""
+        return self._gateway().list_tools(self.ctx.tenant)
+
+    def tool(self, name: str) -> dict[str, Any]:
+        return self._gateway().get_tool(self.ctx.tenant, name)
+
+    def tool_url(self, name: str) -> str:
+        return f"{gateway_public_url(self.ctx)}/mcp/{self.ctx.tenant}/{name}"
+
+    def save_tool(self, name: str, *, url: str, description: str = "", auth_header: str = "",
+                  auth_value: str | None = None, allow: list[str] | None = None) -> dict[str, Any]:
+        """Register an MCP server (or update yours). auth_value goes to the gateway only, encrypted there."""
+        if allow is not None:
+            allow = self._tool_ids(allow)
+        if auth_value and not auth_header and not auth_value.startswith(("Bearer ", "Basic ")):
+            auth_value = f"Bearer {auth_value}"   # a bare token goes in Authorization: Bearer <token>
+        if auth_value is not None and not auth_header:
+            auth_header = "Authorization" if auth_value else ""
+        body = {"tenant": self.ctx.tenant, "name": name, "url": url, "description": description,
+                "auth_header": auth_header, "auth_value": auth_value, "allow": allow}
+        return {**self._gateway().save_tool(body), "mcp_url": self.tool_url(name)}
+
+    def delete_tool(self, name: str) -> dict[str, Any]:
+        return self._gateway().delete_tool(self.ctx.tenant, name)
+
+    def tool_allow(self, name: str, who: list[str]) -> dict[str, Any]:
+        """who: DataOS user ids or emails (checked against Heimdall), "*" for every DataOS user, app:<name>."""
+        return self._gateway().tool_access(self.ctx.tenant, name, self._tool_ids(who), [])
+
+    def tool_deny(self, name: str, who: list[str]) -> dict[str, Any]:
+        return self._gateway().tool_access(self.ctx.tenant, name, [], list(who))
+
+    def tool_usage(self, name: str | None = None, *, since_hours: int = 24 * 30,
+                   group_by: str = "tool,caller") -> dict[str, Any]:
+        return self._gateway().tool_usage(tool=name, tenant=self.ctx.tenant, since_hours=since_hours,
+                                          group_by=group_by)
+
+    def _allow_app_on_tools(self, app: str, tools: list[str]) -> list[str]:
+        """Let the app call each tool. Works for tools you own; for someone else's, say who has to do it."""
+        notes = []
+        for t in tools:
+            try:
+                self._gateway().tool_access(self.ctx.tenant, t, [f"app:{app}"], [])
+                notes.append(f"tool {t}: app:{app} allowed")
+            except Exception as e:
+                notes.append(f"tool {t}: could not allow app:{app} ({e}); its owner must run "
+                             f"`dapp tool allow {t} app:{app}`")
+        return notes
+
+    def _tool_ids(self, who: list[str]) -> list[str]:
+        people = [w for w in who if w != "*" and not w.startswith("app:")]
+        ids, _ = self.resolve_users(people) if people else ([], {})
+        return [w for w in who if w == "*" or w.startswith("app:")] + ids
 
     # ---------- helpers ----------
     def _gateway(self) -> GatewayUsage:

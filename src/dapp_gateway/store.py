@@ -13,8 +13,11 @@ from sqlalchemy import (
     DateTime,
     Integer,
     String,
+    Text,
+    UniqueConstraint,
     case,
     create_engine,
+    delete,
     func,
     inspect,
     select,
@@ -71,6 +74,53 @@ class Usage(Base):
 
 
 GROUPABLE = ("app", "tenant", "owner", "model", "provider", "day", "end_user")
+
+
+class Tool(Base):
+    """An MCP server registered with the gateway. Callers reach it at /mcp/<tenant>/<name>; the gateway checks who
+    they are, injects the tool's credential (callers never see it) and records every call."""
+    __tablename__ = "tools"
+    __table_args__ = (UniqueConstraint("tenant", "name"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(64), index=True)
+    owner: Mapped[str] = mapped_column(String(128), index=True)
+    url: Mapped[str] = mapped_column(String(512))
+    description: Mapped[str] = mapped_column(String(512), default="")
+    auth_header: Mapped[str] = mapped_column(String(64), default="")
+    auth_secret: Mapped[str] = mapped_column(Text, default="")      # encrypted with the gateway's secret key
+    allow: Mapped[str] = mapped_column(Text, default="[]")          # JSON list: user ids, "*", "app:<name>"
+    created: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ToolCall(Base):
+    __tablename__ = "tool_calls"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    tenant: Mapped[str] = mapped_column(String(64), index=True)
+    tool: Mapped[str] = mapped_column(String(64), index=True)
+    owner: Mapped[str] = mapped_column(String(128), index=True)     # the tool's owner, so they see all its calls
+    caller: Mapped[str] = mapped_column(String(160), index=True)    # DataOS user id, or app:<name>
+    end_user: Mapped[str] = mapped_column(String(128), default="")  # for app callers: who was using the app
+    method: Mapped[str] = mapped_column(String(64), default="")     # JSON-RPC method, e.g. tools/call
+    tool_name: Mapped[str] = mapped_column(String(128), default="")  # for tools/call: which function
+    status: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[bool] = mapped_column(Boolean, default=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+
+
+TOOL_GROUPABLE = ("tool", "tenant", "caller", "end_user", "method", "tool_name", "day")
+
+
+def tool_view(t: Tool, *, full: bool) -> dict:
+    """What callers may see of a tool. Never the credential; the allow list only for its owner/admins."""
+    out = {"tenant": t.tenant, "name": t.name, "owner": t.owner, "description": t.description,
+           "endpoint": f"/mcp/{t.tenant}/{t.name}", "has_auth": bool(t.auth_secret),
+           "created": t.created.isoformat(), "updated": t.updated.isoformat()}
+    if full:
+        out.update(url=t.url, auth_header=t.auth_header, allow=json.loads(t.allow or "[]"))
+    return out
 
 
 class Store:
@@ -172,6 +222,77 @@ class Store:
         for r in rows:
             for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "errors"):
                 r[k] = int(r[k] or 0)
+            if "day" in r:
+                r["day"] = str(r["day"])
+        return rows
+
+    # ---- tools (MCP servers)
+    def get_tool(self, tenant: str, name: str) -> Tool | None:
+        with Session(self.engine) as s:
+            t = s.execute(select(Tool).where(Tool.tenant == tenant, Tool.name == name)).scalar_one_or_none()
+            if t is not None:
+                s.expunge(t)
+            return t
+
+    def save_tool(self, *, tenant: str, name: str, owner: str, url: str, description: str, auth_header: str,
+                  auth_secret: str | None, allow: list[str] | None) -> Tool:
+        """Create, or update an existing one. auth_secret None keeps the stored credential; "" removes it.
+        allow None keeps the current list (a new tool starts with only its owner)."""
+        with Session(self.engine) as s, s.begin():
+            t = s.execute(select(Tool).where(Tool.tenant == tenant, Tool.name == name)).scalar_one_or_none()
+            if t is None:
+                t = Tool(tenant=tenant, name=name, owner=owner, allow="[]")
+                s.add(t)
+            t.url, t.description, t.auth_header, t.updated = url, description, auth_header, now()
+            if auth_secret is not None:
+                t.auth_secret = auth_secret
+            if allow is not None:
+                t.allow = json.dumps(sorted(set(allow)))
+            s.flush()
+            s.expunge(t)
+            return t
+
+    def set_tool_allow(self, tenant: str, name: str, allow: list[str]) -> list[str]:
+        clean = sorted(set(allow))
+        with Session(self.engine) as s, s.begin():
+            s.execute(update(Tool).where(Tool.tenant == tenant, Tool.name == name)
+                      .values(allow=json.dumps(clean), updated=now()))
+        return clean
+
+    def delete_tool(self, tenant: str, name: str) -> int:
+        with Session(self.engine) as s, s.begin():
+            return s.execute(delete(Tool).where(Tool.tenant == tenant, Tool.name == name)).rowcount or 0
+
+    def list_tools(self) -> list[Tool]:
+        with Session(self.engine) as s:
+            rows = list(s.execute(select(Tool).order_by(Tool.tenant, Tool.name)).scalars())
+            for t in rows:
+                s.expunge(t)
+            return rows
+
+    def record_tool_call(self, **row) -> None:
+        with Session(self.engine) as s, s.begin():
+            s.add(ToolCall(**row))
+
+    def tool_summary(self, *, owner: str | None, tool: str | None, tenant: str | None, since_hours: int,
+                     group_by: list[str]) -> list[dict]:
+        group_by = [g for g in group_by if g in TOOL_GROUPABLE] or ["tool"]
+        cols = [func.date(ToolCall.ts).label("day") if g == "day" else getattr(ToolCall, g).label(g) for g in group_by]
+        q = select(*cols, func.count().label("calls"),
+                   func.sum(case((ToolCall.error.is_(True), 1), else_=0)).label("errors"),
+                   func.avg(ToolCall.latency_ms).label("avg_latency_ms"),
+                   ).where(ToolCall.ts >= now() - timedelta(hours=since_hours))
+        if owner:
+            q = q.where(ToolCall.owner == owner)
+        if tool:
+            q = q.where(ToolCall.tool == tool)
+        if tenant:
+            q = q.where(ToolCall.tenant == tenant)
+        with Session(self.engine) as s:
+            rows = [dict(r._mapping) for r in s.execute(q.group_by(*cols).order_by(*cols))]
+        for r in rows:
+            r["errors"] = int(r["errors"] or 0)
+            r["avg_latency_ms"] = int(r["avg_latency_ms"] or 0)
             if "day" in r:
                 r["day"] = str(r["day"])
         return rows
