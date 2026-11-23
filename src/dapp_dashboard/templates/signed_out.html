@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Signed out · DataOS Apps{% endblock %}
+{% block body %}
+<div class="panel" style="max-width:440px;margin:40px auto">
+  <h1>Signed out</h1>
+  <p class="sub">You're signed out of the dashboard. DataOS may still keep you signed in, so signing back in can be instant.</p>
+  <p><a href="{{ request.scope.root_path }}/login"><button class="primary">Sign in again</button></a></p>
+</div>
+{% endblock %}

@@ -1,0 +1,26 @@
+# OpenAI chatbot on DataOS.
+#
+# Option A (recommended): calls go through the dapp gateway, so tokens show in the dashboard and the app
+# never holds the real key. The OpenAI key goes into the gateway's secret (see README "Where the key goes").
+#   dapp deploy -f examples/chatbot/dapp.yaml
+#
+# Option B (no gateway yet): set llm: false, uncomment `secrets:` below, and give the app its own key:
+#   cp examples/chatbot/.env.example examples/chatbot/.env    # put the key in .env (gitignored)
+#   dapp secret set chatbot openai --from-env-file examples/chatbot/.env --no-attach
+#   dapp deploy -f examples/chatbot/dapp.yaml
+name: chatbot
+title: DataOS Chatbot
+description: OpenAI chatbot deployed with dapp
+image: docker.io/tmdcio/dapp-chatbot:0.1.6   # docker build -f examples/chatbot/Dockerfile -t docker.io/tmdcio/dapp-chatbot:0.1.6 .
+port: 8080
+command: [sh, -c, "uvicorn app:app --host 0.0.0.0 --port 8080 --proxy-headers"]
+compute: runnable-default
+path: /chatbot
+resources: {cpu: 100m, memory: 192Mi, cpuLimit: 500m, memoryLimit: 384Mi}
+llm: true
+metrics: true            # the app runs dapp_metrics; the dashboard shows its CPU and memory
+env:
+  ROOT_PATH: /chatbot
+  OPENAI_MODEL: gpt-6-luna
+  OPENAI_REASONING_EFFORT: low   # gpt-6-luna reasons by default (medium); low keeps a chat fast and cheap
+# secrets: [dapp-chatbot-openai]   # Option B only

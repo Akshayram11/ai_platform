@@ -1,0 +1,25 @@
+# A new LLM-powered app (not a chat): a JSON API that summarizes documents.
+#   docker build -f examples/llm-api/Dockerfile -t docker.io/<you>/doc-summarizer:0.1.0 .   (copy the chatbot Dockerfile)
+#   dapp deploy -f examples/llm-api/dapp.yaml --dry-run     # the DataOS manifest, nothing applied
+#   dapp deploy -f examples/llm-api/dapp.yaml --lint        # checked by DataOS, nothing applied
+#   dapp deploy -f examples/llm-api/dapp.yaml
+name: doc-summarizer
+title: Document Summarizer
+description: Summarizes documents with an LLM (JSON API)
+image: docker.io/tmdcio/doc-summarizer:0.1.0
+command: [sh, -c, "uvicorn app:app --host 0.0.0.0 --port 8080 --proxy-headers"]
+port: 8080
+compute: engineering-compute          # needs a use-compute grant (see deploy/grants/app-developer.template.yaml)
+path: /doc-summarizer
+llm: true                             # OPENAI_BASE_URL / ANTHROPIC_BASE_URL point at the gateway; the key is DAPP_LLM_KEY
+metrics: true                         # needs dapp_metrics in the image; shows CPU/memory in the dashboard
+resources: {cpu: 100m, memory: 256Mi, cpuLimit: "1", memoryLimit: 512Mi}
+env:
+  OPENAI_MODEL: gpt-6-luna
+  OPENAI_REASONING_EFFORT: low        # reasoning models only; remove for gpt-4o-mini and older
+  ROOT_PATH: /doc-summarizer
+access:                               # who may call it, besides the owners (checked by dapp_login in the app)
+  users: []
+  roles: [engineering-data-developer]
+# secrets: [dapp-doc-summarizer-extra]   # your own: dapp secret set doc-summarizer extra KEY=VALUE
+# runAs: doc-summarizer-bot              # run as a dedicated bot user instead of you (needs a run-as grant)

@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Sign-in failed · DataOS Apps{% endblock %}
+{% block body %}
+<div class="panel" style="max-width:440px;margin:40px auto">
+  <h1>Sign-in failed</h1>
+  <p class="sub">DataOS didn't complete the sign-in. This can happen if the page was open for more than ten minutes or cookies are blocked.</p>
+  <p><a href="{{ request.scope.root_path }}/login"><button class="primary">Try again</button></a></p>
+</div>
+{% endblock %}

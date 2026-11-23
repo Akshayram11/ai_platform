@@ -1,0 +1,16 @@
+# Smallest useful app: an unprivileged nginx.
+#   dapp deploy -f examples/hello/dapp.yaml --dry-run    # see the DataOS manifest
+#   dapp deploy -f examples/hello/dapp.yaml
+name: hello-dapp
+description: Hello world from dapp
+image: nginxinc/nginx-unprivileged:1.27-alpine
+port: 8080
+command: [/docker-entrypoint.sh]
+args: [nginx, -g, "daemon off;"]
+compute: runnable-default
+stripPath: true             # nginx serves /, not /hello-dapp/
+public: true                # nginx has no DataOS sign-in; see examples/chatbot for a private app
+resources: {cpu: 50m, memory: 64Mi, cpuLimit: 200m, memoryLimit: 128Mi}
+workingDirs:
+  - id: nginx-tmp
+    directory: /tmp

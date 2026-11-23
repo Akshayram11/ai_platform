@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% macro status_pill(a) -%}
+<span class="pill {{ {'running':'ok','failed':'bad'}.get(a.state, 'warn') }}" title="{{ a.runtime or a.status }}">{{ a.state }}</span>
+{%- endmacro %}
+{% block body %}
+<h1>{{ 'All apps in ' ~ s.tenant if all else 'Your apps' }}</h1>
+<p class="sub">
+  {% if all %}<a href="?">Show only mine</a>{% else %}<a href="?all=true">Show every app in {{ s.tenant }}</a>{% endif %}
+  · deploy with <code>dapp deploy</code>
+</p>
+
+<div class="kpis">
+  <div class="kpi"><div class="label">Apps</div><div class="value">{{ apps|length }}</div></div>
+  {% set running = apps|selectattr('state','equalto','running')|list|length %}
+  <div class="kpi"><div class="label">Running</div><div class="value">{{ running }}</div></div>
+  {% if llm and not llm.error %}
+  <div class="kpi"><div class="label">LLM tokens · 30 days</div><div class="value">{{ (llm.total.input_tokens + llm.total.output_tokens)|num }}</div></div>
+  <div class="kpi"><div class="label">LLM cost · 30 days</div><div class="value">{{ ('$%.4f' if llm.total.cost_usd < 1 else '$%.2f')|format(llm.total.cost_usd) if llm.total.cost_usd is not none else '–' }}</div></div>
+  {% else %}
+  <div class="kpi"><div class="label">LLM usage</div><div class="value muted" style="font-size:13px">gateway not reachable</div></div>
+  {% endif %}
+</div>
+
+{% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+<div class="panel">
+{% if apps %}
+<table>
+  <thead><tr><th>App</th><th>Status</th><th>Owner</th><th>Access</th>
+    {% if has_prom %}<th class="num">CPU (cores)</th><th class="num">Memory</th>{% endif %}
+    <th class="num">LLM tokens</th><th>URL</th></tr></thead>
+  <tbody>
+  {% for a in apps %}
+  {% set c = compute.get(a.name) or {} %}{% set u = by_app.get(a.name) %}
+  <tr>
+    <td><a href="{{ request.scope.root_path }}/apps/{{ a.name }}">{{ a.name }}</a>{% if not a.managed_by_dapp %} <span class="muted">(not via dapp)</span>{% endif %}</td>
+    <td>{{ status_pill(a) }}{% if a.error %}<div class="muted" style="font-size:12px">{{ a.error[:120] }}</div>{% endif %}</td>
+    <td>{{ a.owner }}</td>
+    {% set ac = a.access %}
+    <td style="white-space:nowrap">{% if ac %}{% if ac.mode == 'login' %}{% if ac.everyone %}<span class="pill warn" title="Anyone signed in to DataOS can open it">everyone</span>{% else %}{{ ac.people }} {{ 'person' if ac.people == 1 else 'people' }}{% if ac.roles %} + {{ ac.roles }} {{ 'role' if ac.roles == 1 else 'roles' }}{% endif %}{% endif %}{% elif ac.mode == 'public' %}<span class="pill warn" title="No sign-in in front of the app">public</span>{% else %}<span class="muted">DataOS policy</span>{% endif %} · {% endif %}<a href="{{ request.scope.root_path }}/apps/{{ a.name }}?tab=access">Manage</a></td>
+    {% if has_prom %}<td class="num">{{ c.cpu_cores|num(3) if c and not c.error else '–' }}</td><td class="num">{{ c.memory_bytes|bytes if c and not c.error else '–' }}</td>{% endif %}
+    <td class="num">{{ (u.input_tokens + u.output_tokens)|num if u else '–' }}</td>
+    <td>{% if a.url %}<a href="{{ a.url }}" target="_blank" rel="noopener">open</a>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No apps yet. Try <code>dapp init hello &amp;&amp; dapp deploy</code>.</div>
+{% endif %}
+</div>
+{% endblock %}

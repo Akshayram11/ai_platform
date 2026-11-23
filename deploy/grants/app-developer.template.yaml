@@ -1,0 +1,69 @@
+# What a person needs, beyond logging in, to deploy apps with dapp in the engineering tenant.
+# Copy it, replace REPLACE_USER, then (a tenant admin or operator):
+#   dataos-ctl resource apply -f deploy/grants/app-developer.template.yaml -l    # lint
+#   dataos-ctl resource apply -f deploy/grants/app-developer.template.yaml
+#
+# 1. Create apps and secrets in the tenant. They own what they create, so they can update and delete it too.
+name: dapp-dev-create-REPLACE_USER
+version: v2alpha
+type: grant
+tenant: engineering
+tags: [governance, grant, dapp]
+description: REPLACE_USER may create resources in engineering
+grant:
+  policy_use_case_id: create-tenant-resources
+  subjects:
+    - users:id:REPLACE_USER
+  values:
+    create-in-tenant:
+      - tenant: engineering
+    read-in-tenant:
+      - tenant: engineering
+  collection: engineering
+  requester: REPLACE_ADMIN
+  notes: deploy apps with dapp
+  approve: true
+---
+# 2. Run on the compute.
+name: dapp-dev-compute-REPLACE_USER
+version: v2alpha
+type: grant
+tenant: engineering
+tags: [governance, grant, dapp]
+description: REPLACE_USER may run on engineering-compute
+grant:
+  policy_use_case_id: use-specific-compute
+  subjects:
+    - users:id:REPLACE_USER
+  values:
+    read-resource-tenant-dataos-resource:
+      - type: compute
+    use-compute-specific-tenant-dataos-resource:
+      - name: engineering-compute
+  collection: engineering
+  requester: REPLACE_ADMIN
+  notes: apps run on engineering-compute
+  approve: true
+---
+# 3. Read the secrets dapp creates (always named dapp-<app>-...): the app's gateway key, its sign-in secret, its own.
+#    Poros reads an app's secrets as the user it runs as, so without this the deploy fails with
+#    "Forbidden ... predicate 'read', object 'dataos:type:secret:engineering:dapp-<app>-llm'".
+name: dapp-dev-secrets-REPLACE_USER
+version: v2alpha
+type: grant
+tenant: engineering
+tags: [governance, grant, dapp]
+description: REPLACE_USER may read their dapp secrets
+grant:
+  policy_use_case_id: use-specific-secret
+  subjects:
+    - users:id:REPLACE_USER
+  values:
+    read-specific-secret-governance:
+      - id: engineering:dapp-**
+  collection: system
+  requester: REPLACE_ADMIN
+  notes: secrets created by dapp (dapp-<app>-...)
+  approve: true
+# Only if the app uses `runAs: some-bot`: a fourth grant, policy_use_case_id: run-as-user,
+#   values: {run-as-dataos-resource: [{userId: some-bot}]}, collection: engineering (see databots/deploy/ai).

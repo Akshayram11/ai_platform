@@ -1,0 +1,30 @@
+# The dapp LLM gateway, deployed as a DataOS app with dapp itself:
+#   dapp secret apply deploy/secrets/dapp-gateway-providers.yaml --env-file .env.gateway   # the provider keys
+#   dapp deploy -f deploy/gateway.dapp.yaml
+# .env.gateway (gitignored): OPENAI_API_KEY=..., optionally ANTHROPIC_API_KEY=..., DATABASE_URL=postgresql+psycopg://...
+name: dapp-llm-gateway          # DataOS names the workload from the app's creation; never toggle stateful/disk on a live app (see README)
+description: LLM gateway for DataOS apps; meters tokens per app
+image: docker.io/tmdcio/dataos-apps:0.1.12
+command: [dapp-gateway]
+port: 8080
+compute: engineering-compute
+hostname: dapp-gateway          # apps reach it in-cluster at http://dapp-gateway:8080
+path: /dapp-gateway             # admin API for the CLI/dashboard
+stripPath: true                 # the ingress removes the prefix; ROOT_PATH is only used to build links
+public: true                    # no Kong check: /admin/* verifies DataOS tokens with Heimdall, /openai|/anthropic need a dapp app key
+metrics: true
+replicas: 1                     # SQLite on one disk is single-writer; use Postgres (DATABASE_URL) to scale out
+resources: {cpu: 100m, memory: 256Mi, cpuLimit: "1", memoryLimit: 512Mi}
+env:
+  ROOT_PATH: /dapp-gateway
+  DATAOS_FQDN: poliks.instance.dataos.cloud
+  DATABASE_URL: sqlite:////data/gateway.db     # overridden by the secret when it sets DATABASE_URL
+  # DAPP_GATEWAY_ADMINS: alice,bob             # may see everyone's usage
+  # USD per 1M tokens, from OpenAI's model pages (gpt-6-luna: input 0.10, cached 0.01, cache write 0.125, output 0.50;
+  # gpt-4o-mini: input 0.15, cached 0.075, output 0.60). Prompts over 272K tokens cost 2x on gpt-6-luna; not modelled.
+  DAPP_PRICING: '{"gpt-6-luna": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125}, "gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075}}'
+disk:                           # app keys and usage survive restarts and redeploys (SQLite file lives here)
+  size: 1Gi
+  mountPath: /data
+secrets:
+  - dapp-gateway-providers

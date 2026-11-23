@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Keys · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% block body %}
+<h1>Keys</h1>
+<p class="sub">Two different kinds. <b>DataOS API keys</b> let you, an agent or CI act as you in DataOS.
+<b>LLM gateway keys</b> belong to an app: it uses one to call the LLM without ever holding the real provider key.</p>
+
+{% if created %}
+<div class="flash">New API key <b>{{ created.name }}</b>. This is the only time it is shown, copy it now:
+  <pre>{{ (created.data or {}).apikey }}</pre></div>
+{% endif %}
+
+<h2>LLM gateway keys</h2>
+<p class="muted" style="margin-top:-4px">One active key per app lives in the app's secret as <code>DAPP_LLM_KEY</code>
+and is created by <code>dapp deploy</code> when the app has <code>llm: true</code>. The gateway keeps only a hash, so a key
+can't be shown again.
+<b>Rotate</b> = new key stored, DataOS restarts the app (~40s), old key revoked afterwards, no failed calls.
+<b>Revoke</b> = kill a key right now; an app still using it gets errors until you rotate.</p>
+
+{% if llm_error %}
+<div class="panel"><div class="muted">LLM gateway not reachable: {{ llm_error }}</div></div>
+{% elif llm_groups %}
+{% for g in llm_groups %}
+<div class="panel">
+  <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px">
+    <div><a href="{{ root }}/apps/{{ g.app }}?tab=llm"><b>{{ g.app }}</b></a> <span class="muted">· {{ g.tenant }} ·
+      {{ g.active }} active</span></div>
+    <form class="inline" method="post" action="{{ root }}/llm-keys/{{ g.app }}/rotate"
+          onsubmit="return confirm('Rotate the LLM key for {{ g.app }}?\n\nA new key is stored, DataOS restarts the app (about 40 seconds, no failed calls) and the old key is revoked afterwards.')">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="back_to" value="/keys">
+      <button class="primary">Rotate key</button>
+    </form>
+  </div>
+  <table><thead><tr><th>Key</th><th>Created</th><th>State</th><th></th></tr></thead><tbody>
+  {% for k in g.entries %}
+  <tr><td><code>{{ k.prefix }}…</code></td><td>{{ k.created|when }}</td>
+    <td>{% if k.revoked %}<span class="pill">revoked</span>{% else %}<span class="pill ok">active</span>{% endif %}</td>
+    <td>{% if not k.revoked %}
+      <form class="inline" method="post" action="{{ root }}/llm-keys/{{ g.app }}/{{ k.prefix }}/revoke"
+            onsubmit="return confirm('Revoke {{ k.prefix }}… right now?\n\nIf {{ g.app }} still uses it, its LLM calls fail until you rotate the key.')">
+        <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="back_to" value="/keys">
+        <button class="danger">Revoke</button>
+      </form>{% endif %}</td></tr>
+  {% endfor %}
+  </tbody></table>
+</div>
+{% endfor %}
+{% else %}
+<div class="panel"><div class="empty">No LLM keys yet. An app gets one when you deploy it with <code>llm: true</code>.</div></div>
+{% endif %}
+
+<h2>DataOS API keys</h2>
+<p class="muted" style="margin-top:-4px">Use one as <code>DATAOS_RUN_AS_APIKEY</code> for agents and CI. The key is shown once when you create it.</p>
+<div class="panel">
+{% if keys is mapping and keys.error %}<div class="flash err">{{ keys.error }}</div>
+{% elif keys %}
+<table><thead><tr><th>Name</th><th>Expires</th><th>Description</th><th></th></tr></thead><tbody>
+{% for k in keys %}<tr><td><code>{{ k.name }}</code></td><td>{{ k.expiration|when }}</td><td class="muted">{{ k.description }}</td>
+<td>{% if k.system %}<span class="pill" title="DataOS created this key so your apps can run as you. Deleting it breaks them.">managed by DataOS</span>
+{% else %}<form class="inline" method="post" action="{{ root }}/keys/{{ k.name }}/delete" onsubmit="return confirm('Delete key {{ k.name }}? Anything using it stops working.')"><input type="hidden" name="csrf" value="{{ s.csrf }}"><button class="danger">Delete</button></form>{% endif %}</td></tr>{% endfor %}
+</tbody></table>
+{% else %}<div class="empty">No API keys.</div>{% endif %}
+  <form class="row" method="post" action="{{ root }}/keys" style="margin-top:14px">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <label>Name<input name="key_name" required pattern="[A-Za-z0-9_]+" placeholder="my_agent_key" title="letters, digits and underscore only (no hyphen)"></label>
+    <label>Lifetime<select name="duration"><option>24h</option><option>168h</option><option selected>720h</option><option>2160h</option></select></label>
+    <button class="primary">Create API key</button>
+  </form>
+</div>
+{% endblock %}

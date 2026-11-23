@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+*.db
+*.sqlite
+.env
+.env.*
+!.env.example
+# rendered manifests can contain secret values
+.dapp/

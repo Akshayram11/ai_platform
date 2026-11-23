@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% set spec = app.spec or {} %}{% set svc = spec.service or {} %}
+{% block body %}
+<p class="muted"><a href="{{ root }}/">Apps</a> /</p>
+<h1>{{ name }}</h1>
+<p class="sub">{{ (spec.app or {}).description }} · owner {{ app.owner }} · {{ app.tenant }}
+  {% if app.url %}· <a href="{{ app.url }}" target="_blank" rel="noopener">{{ app.url }}</a>{% endif %}</p>
+
+<nav class="tabs">
+  {% for t, label in [('overview','Overview'),('llm','LLM usage'),('secrets','Secrets'),('access','Access'),('logs','Logs'),('settings','Settings')] %}
+  <a class="{{ 'on' if tab == t }}" href="?tab={{ t }}">{{ label }}</a>
+  {% endfor %}
+</nav>
+
+{% if tab == 'overview' %}
+<div class="kpis">
+  <div class="kpi"><div class="label">Status</div><div class="value" style="font-size:16px">{{ app.state }}</div><div class="muted" style="font-size:12px">{{ app.runtime }}</div>
+    {% if app.error %}<div class="muted" style="font-size:12px">{{ app.error }}</div>{% endif %}</div>
+  <div class="kpi"><div class="label">Replicas</div><div class="value">{{ spec.replicas or 1 }}</div></div>
+  {% if compute and not compute.error and compute.memory_bytes is not none %}
+  <div class="kpi"><div class="label">CPU now (cores)</div><div class="value">{{ compute.cpu_cores|num(3) }}</div>
+    {% if compute.cpu_limit_cores %}<div class="muted" style="font-size:12px">limit {{ compute.cpu_limit_cores|num(2) }}</div>{% endif %}{{ cpu_spark|safe }}</div>
+  <div class="kpi"><div class="label">Memory now</div><div class="value">{{ compute.memory_bytes|bytes }}</div>
+    {% if compute.memory_limit_bytes %}<div class="muted" style="font-size:12px">of {{ compute.memory_limit_bytes|bytes }} ({{ (compute.memory_bytes / compute.memory_limit_bytes * 100)|num(0) }}%)</div>{% endif %}{{ mem_spark|safe }}</div>
+  <div class="kpi"><div class="label">CPU core-hours · 24h</div><div class="value">{{ compute.cpu_core_hours_24h|num(3) }}</div></div>
+  <div class="kpi"><div class="label">Requests · 24h</div><div class="value">{{ compute.requests_24h|num(0) }}</div>
+    {% if compute.errors_24h %}<div class="muted" style="font-size:12px">{{ compute.errors_24h|num(0) }} server errors</div>{% endif %}</div>
+  {% elif compute and compute.error %}
+  <div class="kpi"><div class="label">Compute</div><div class="value muted" style="font-size:13px">metrics unavailable: {{ compute.error[:120] }}</div></div>
+  {% else %}
+  <div class="kpi"><div class="label">Compute</div><div class="value muted" style="font-size:13px">no data. DataOS doesn't collect pod CPU/memory, so the app must report it: set <code>metrics: true</code> in dapp.yaml and run <code>dapp_metrics</code> in the app.</div></div>
+  {% endif %}
+  {% if llm and not llm.error %}
+  <div class="kpi"><div class="label">LLM tokens · 30 days</div><div class="value">{{ (llm.total.input_tokens + llm.total.output_tokens)|num }}</div></div>
+  {% endif %}
+</div>
+
+<h2>Pods</h2>
+<div class="panel">
+{% set rd = app.runtime_detail or {} %}{% set nodes = rd.nodeDetails or rd.nodes or [] %}
+{% if nodes %}
+<table><thead><tr><th>Pod</th><th>Phase</th><th>Containers</th><th>Dataplane</th></tr></thead><tbody>
+{% for n in nodes %}<tr><td><code>{{ n.nodeName or n.name }}</code></td><td>{{ n.phase or n.status }}</td><td>{{ (n.containers or [])|join(', ') }}</td><td class="muted">{{ n.dataplane }}</td></tr>{% endfor %}
+</tbody></table>
+{% elif rd.error %}<div class="muted">{{ rd.error }}</div>
+{% else %}<div class="empty">No pods reported.</div>{% endif %}
+</div>
+
+<h2>Deployment</h2>
+<div class="panel"><table>
+  <tr><th>Image</th><td><code>{{ svc.image }}</code></td></tr>
+  <tr><th>Port</th><td>{{ svc.port }}</td></tr>
+  <tr><th>Compute</th><td>{{ spec.compute }}</td></tr>
+  <tr><th>Runs as</th><td>{{ spec.runAsUser or app.owner }}</td></tr>
+  <tr><th>Resources</th><td>{{ (spec.resources or {}).requests }} → limits {{ (spec.resources or {}).limits }}</td></tr>
+  <tr><th>Login required</th><td>{{ 'no (public)' if (svc.http or {}).noNetworkAuthorization else 'yes (DataOS)' }}</td></tr>
+  <tr><th>Secrets</th><td>{% for x in svc.secrets or [] %}<code>{{ x.id }}</code> {% else %}<span class="muted">none</span>{% endfor %}</td></tr>
+</table></div>
+{% endif %}
+
+{% if tab == 'llm' %}
+<h2>Gateway key</h2>
+<div class="panel">
+{% if not uses_gateway %}
+  <div class="empty">This app doesn't use the LLM gateway. Set <code>llm: true</code> in its dapp.yaml and deploy; it then gets a key
+  (stored in its secret as <code>DAPP_LLM_KEY</code>) and its calls are counted here.</div>
+{% else %}
+  <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px">
+    <span class="muted">The app reads <code>DAPP_LLM_KEY</code> from its secret <code>dapp-{{ name }}-llm</code>.</span>
+    <form class="inline" method="post" action="{{ root }}/llm-keys/{{ name }}/rotate"
+          onsubmit="return confirm('Rotate the LLM key?\n\nA new key is stored, DataOS restarts the app (about 40 seconds, no failed calls) and the old key is revoked afterwards.')">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="back_to" value="/apps/{{ name }}?tab=llm">
+      <button class="primary">Rotate key</button>
+    </form>
+  </div>
+  {% if app_llm_keys %}
+  <table><thead><tr><th>Key</th><th>Created</th><th>State</th><th></th></tr></thead><tbody>
+  {% for k in app_llm_keys|sort(attribute='created', reverse=True) %}
+  <tr><td><code>{{ k.prefix }}…</code></td><td>{{ k.created|when }}</td>
+    <td>{% if k.revoked %}<span class="pill">revoked</span>{% else %}<span class="pill ok">active</span>{% endif %}</td>
+    <td>{% if not k.revoked %}<form class="inline" method="post" action="{{ root }}/llm-keys/{{ name }}/{{ k.prefix }}/revoke"
+        onsubmit="return confirm('Revoke {{ k.prefix }}… right now? The app fails its LLM calls until you rotate the key.')">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="back_to" value="/apps/{{ name }}?tab=llm">
+      <button class="danger">Revoke</button></form>{% endif %}</td></tr>
+  {% endfor %}
+  </tbody></table>
+  {% else %}<div class="muted">The gateway has no key for this app yet.</div>{% endif %}
+{% endif %}
+</div>
+<div class="row" style="justify-content:space-between;align-items:end;margin-top:28px">
+  <h2 style="margin:0">Usage by user</h2>
+  <span class="muted">last
+    {% for d, label in [(1,'24h'),(7,'7 days'),(30,'30 days'),(90,'90 days')] %}<a href="?tab=llm&days={{ d }}"
+      style="{{ 'font-weight:600;color:var(--ink)' if d == days }}">{{ label }}</a>{{ ' · ' if not loop.last }}{% endfor %}</span>
+</div>
+<div class="panel" style="margin-top:10px">
+{% if by_user and by_user.error %}<div class="muted">LLM gateway not reachable: {{ by_user.error }}</div>
+{% elif by_user and by_user.rows %}
+{% set total_tokens = by_user.total.input_tokens + by_user.total.output_tokens %}
+<table><thead><tr><th>User</th><th class="num">Requests</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cost</th><th class="num">Share</th></tr></thead><tbody>
+{% for r in by_user.rows %}
+{% set tok = r.input_tokens + r.output_tokens %}
+<tr><td>{% if r.end_user %}{{ r.end_user }}{% else %}<span class="muted" title="Calls the app made without saying who was using it: older calls, or an app that doesn't forward x-dapp-user">(not attributed)</span>{% endif %}</td>
+<td class="num">{{ r.requests|num }}</td><td class="num">{{ r.input_tokens|num }}</td><td class="num">{{ r.output_tokens|num }}</td>
+<td class="num">{{ ('≥' if r.cost_partial else '') ~ ('$%.4f'|format(r.cost_usd)) if r.cost_usd is not none else '–' }}</td>
+<td class="num">{{ ((tok / total_tokens * 100)|num(0) ~ '%') if total_tokens else '–' }}</td></tr>
+{% endfor %}
+<tr><td><b>Total</b></td><td class="num"><b>{{ by_user.total.requests|num }}</b></td><td class="num"><b>{{ by_user.total.input_tokens|num }}</b></td><td class="num"><b>{{ by_user.total.output_tokens|num }}</b></td><td class="num"><b>{{ ('≥' if by_user.total.cost_partial else '') ~ ('$%.4f'|format(by_user.total.cost_usd)) if by_user.total.cost_usd is not none else '–' }}</b></td><td></td></tr>
+</tbody></table>
+<p class="muted" style="margin:10px 0 0;font-size:12px">Only token counts are kept, never what people typed. A user is whoever the app says was signed in; only this app's own key can set it.</p>
+{% else %}<div class="empty">No calls in this period.</div>{% endif %}
+</div>
+
+<h2>Usage by day and model</h2>
+<div class="panel">
+{% if llm and llm.error %}<div class="muted">LLM gateway not reachable: {{ llm.error }}</div>
+{% elif llm and llm.rows %}
+<table><thead><tr><th>Day</th><th>Model</th><th class="num">Requests</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache read</th><th class="num">Errors</th><th class="num">Cost</th></tr></thead><tbody>
+{% for r in llm.rows %}<tr><td>{{ r.day }}</td><td><code>{{ r.model }}</code></td><td class="num">{{ r.requests|num }}</td><td class="num">{{ r.input_tokens|num }}</td><td class="num">{{ r.output_tokens|num }}</td><td class="num">{{ r.cache_read_tokens|num }}</td><td class="num">{{ r.errors }}</td><td class="num">{{ '$%.4f'|format(r.cost_usd) if r.cost_usd is not none else '–' }}</td></tr>{% endfor %}
+</tbody></table>
+{% else %}<div class="empty">No LLM calls recorded. Set <code>llm: true</code> in dapp.yaml so calls go through the gateway.</div>{% endif %}
+</div>
+{% endif %}
+
+{% if tab == 'secrets' %}
+<div class="panel">
+{% if secrets and secrets.error %}<div class="flash err">{{ secrets.error }}</div>
+{% elif secrets %}
+<table><thead><tr><th>Secret</th><th>Created by dapp</th><th>Injected</th><th></th></tr></thead><tbody>
+{% for x in secrets %}<tr><td><code>{{ x.name }}</code></td><td>{{ 'yes' if x.managed_by_dapp else 'no' }}</td><td>{{ 'yes' if x.referenced else 'no' }}</td>
+<td>{% if x.managed_by_dapp %}<form class="inline" method="post" action="{{ root }}/apps/{{ name }}/secrets/{{ x.name }}/delete" onsubmit="return confirm('Delete secret {{ x.name }}?')"><input type="hidden" name="csrf" value="{{ s.csrf }}"><button class="danger">Delete</button></form>{% endif %}</td></tr>{% endfor %}
+</tbody></table>
+{% else %}<div class="empty">No secrets.</div>{% endif %}
+</div>
+<h2>Add or replace a secret</h2>
+<div class="panel">
+  <p class="muted">Values replace the whole secret and are injected into the app as environment variables. They are never shown again.</p>
+  <form method="post" action="{{ root }}/apps/{{ name }}/secrets">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <div class="row"><label>Secret name<input name="secret" required pattern="[a-z][a-z0-9-]*" value="{{ name }}-env"></label></div>
+    <p><textarea name="pairs" placeholder="KEY=value&#10;OTHER_KEY=value" required></textarea></p>
+    <button class="primary">Save secret</button>
+  </form>
+</div>
+{% endif %}
+
+{% if tab == 'access' %}
+<h2>Who can open this app</h2>
+<div class="panel">
+{% if allow and allow.error %}
+  <div class="flash err">{{ allow.error }}</div>
+{% elif allow and allow.mode == 'login' %}
+  <p class="muted" style="margin-top:0">Private: people sign in with their DataOS account. Owners are always allowed; anyone else must be
+  on this list. Changes restart the app (about 40 seconds, one pod at a time) to apply.</p>
+  <table><thead><tr><th>Who</th><th>Kind</th><th></th></tr></thead><tbody>
+  {% for o in allow.owners %}<tr><td>{{ o }}</td><td><span class="pill ok">owner</span> <span class="muted" style="font-size:12px">always allowed</span></td><td></td></tr>{% endfor %}
+  {% if allow.everyone %}
+  <tr><td><b>Anyone signed in to DataOS</b></td><td><span class="pill warn">everyone</span></td>
+    <td><form class="inline" method="post" action="{{ root }}/apps/{{ name }}/deny" onsubmit="return confirm('Stop letting everyone in? Only owners and the people listed here will keep access.')">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="kind" value="user"><input type="hidden" name="value" value="*"><button class="danger">Remove</button></form></td></tr>
+  {% endif %}
+  {% for u in allow.extra_users %}<tr><td>{{ u }}</td><td><span class="pill">user</span></td>
+    <td><form class="inline" method="post" action="{{ root }}/apps/{{ name }}/deny" onsubmit="return confirm('Remove {{ u }}? They lose access once the app restarts.')">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="kind" value="user"><input type="hidden" name="value" value="{{ u }}"><button class="danger">Remove</button></form></td></tr>{% endfor %}
+  {% for r in allow.roles %}<tr><td>everyone with role <code>{{ r }}</code></td><td><span class="pill">role</span></td>
+    <td><form class="inline" method="post" action="{{ root }}/apps/{{ name }}/deny" onsubmit="return confirm('Remove role {{ r }}? Its members lose access once the app restarts.')">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="kind" value="role"><input type="hidden" name="value" value="{{ r }}"><button class="danger">Remove</button></form></td></tr>{% endfor %}
+  </tbody></table>
+{% elif allow and allow.mode == 'public' %}
+  <div class="empty">This app is <b>public</b>: anyone with the link can open it, so there is no list to manage.
+  To make it private, remove <code>public: true</code> from its dapp.yaml and deploy.</div>
+{% elif allow %}
+  <div class="empty">This app isn't protected by dapp sign-in, so this list doesn't apply. Redeploy it with dapp (the default is private).</div>
+{% endif %}
+</div>
+
+{% if allow and allow.mode == 'login' %}
+<h2>Add people</h2>
+<div class="panel">
+  <form method="post" action="{{ root }}/apps/{{ name }}/allow">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <div class="row" style="align-items:start">
+      <label style="flex:2;min-width:260px">DataOS users <span style="font-weight:400">(username or email, separated by commas or spaces)</span>
+        <input name="users" list="people" autocomplete="off" placeholder="start typing a name, e.g. chetan">
+        {% if people %}<datalist id="people">{% for u in people %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}</datalist>{% endif %}</label>
+      <label style="flex:1;min-width:220px">Roles <span style="font-weight:400">(optional)</span>
+        <input name="roles" autocomplete="off" placeholder="engineering-data-developer"></label>
+    </div>
+    <p style="margin:12px 0"><label style="flex-direction:row;align-items:center;gap:8px;color:var(--ink);font-size:13px"><input type="checkbox" name="everyone" value="1">
+      Anyone signed in to DataOS (every person on this instance)</label></p>
+    <button class="primary">Allow</button>
+    <span class="muted" style="font-size:12px;margin-left:10px">Takes effect when the app restarts, about 40 seconds.</span>
+  </form>
+</div>
+{% endif %}
+
+<details style="margin-top:28px"><summary class="muted" style="cursor:pointer">Advanced: DataOS policy grants recorded for this app</summary>
+<div class="panel" style="margin-top:10px">
+{% if access and access.error %}<div class="flash err">{{ access.error }}</div>
+{% elif access %}
+<table><thead><tr><th>Grant</th><th>Use case</th><th>Subjects</th><th>Status</th><th></th></tr></thead><tbody>
+{% for g in access %}<tr><td><code>{{ g.name }}</code></td><td>{{ g.use_case }}</td><td>{{ (g.subjects or [])|join(', ') }}</td><td>{{ g.status }}</td>
+<td><form class="inline" method="post" action="{{ root }}/apps/{{ name }}/access/{{ g.name }}/delete" onsubmit="return confirm('Revoke {{ g.name }}?')"><input type="hidden" name="csrf" value="{{ s.csrf }}"><button class="danger">Revoke</button></form></td></tr>{% endfor %}
+</tbody></table>
+{% else %}<div class="empty">No grants recorded for this app.</div>{% endif %}
+  <form method="post" action="{{ root }}/apps/{{ name }}/access" style="margin-top:14px">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <div class="row">
+      <label>User or subject<input name="user" required placeholder="janedoe or roles:id:data-dev"></label>
+      <label>Policy use case<input name="use_case" required placeholder="e.g. view-{{ name }}-app"></label>
+    </div>
+    <p><label class="muted" style="font-size:12px">Use-case values, one per line as ATOM:KEY=VALUE (optional)</label>
+    <textarea name="values" placeholder="read-in-tenant:tenant={{ app.tenant }}"></textarea></p>
+    <button>Create grant</button>
+  </form>
+</div>
+</details>
+{% endif %}
+
+{% if tab == 'logs' %}
+<div class="panel">
+{% if logs is mapping and logs.error %}<div class="flash err">{{ logs.error }}</div>
+{% else %}<pre>{{ logs if logs is string else logs|tojson(indent=1) }}</pre>{% endif %}
+</div>
+{% endif %}
+
+{% if tab == 'settings' %}
+<h2>Scale</h2>
+<div class="panel">
+  <form class="row" method="post" action="{{ root }}/apps/{{ name }}/scale">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <label>Replicas<input type="number" name="replicas" min="1" max="50" value="{{ spec.replicas or 1 }}"></label>
+    <button class="primary">Apply</button>
+  </form>
+</div>
+<h2>Delete app</h2>
+<div class="panel">
+  <form method="post" action="{{ root }}/apps/{{ name }}/delete">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <div class="row">
+      <label>Type <b>{{ name }}</b> to confirm<input name="confirm" autocomplete="off"></label>
+      <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="purge" value="true"> also delete its secrets, grants and LLM keys</label>
+      <button class="danger">Delete</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

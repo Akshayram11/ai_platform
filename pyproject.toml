@@ -1,0 +1,52 @@
+[project]
+name = "dataos-apps"
+version = "0.1.0"
+description = "Run DataOS as an app platform: the dapp CLI (for people and agents), an LLM gateway with token metering, and an apps dashboard."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "typer>=0.12",
+  "httpx>=0.27",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "rich>=13.7",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.2"]
+gateway = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "sqlalchemy>=2.0"]
+dashboard = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "jinja2>=3.1", "python-multipart>=0.0.9"]
+all = ["dataos-apps[mcp,gateway,dashboard]"]
+
+[project.scripts]
+dapp = "dapp.cli:main"
+dapp-gateway = "dapp_gateway.app:main"
+dapp-dashboard = "dapp_dashboard.app:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "respx>=0.21", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dapp", "src/dapp_gateway", "src/dapp_dashboard"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/dapp_login.py" = "dapp_login.py"
+"src/dapp_metrics.py" = "dapp_metrics.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# the top-level modules (dapp_login, dapp_metrics) are force-included into the wheel; import them from src, not a stale copy
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 110
+src = ["src"]
+
+[tool.ruff.lint]
+# B008: Typer/FastAPI declare options and dependencies as defaults by design.
+# BLE001: broad catches are deliberate around optional backends (gateway, metrics).
+ignore = ["B008", "BLE001", "PLW1510", "PYI034"]
