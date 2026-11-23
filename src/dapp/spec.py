@@ -8,6 +8,7 @@ Poros turns into a ``service`` named ``<name>svc`` (Deployment + Service + Kong 
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,10 @@ LLM_SECRET_SUFFIX = "-llm"
 SECRET_PREFIX = "dapp-"
 # Secret with the app's OIDC client secret (key `clientSecret`, what Poros reads) and session key.
 OIDC_SECRET_SUFFIX = "-oidc"
+RUNTIMES = ("python-3.12",)
+RUNTIME_REVISION = "r3"   # bump with each runtime image build (runtimes/python.Dockerfile)
+RUNTIME_RE = re.compile(r"^(" + "|".join(re.escape(r) for r in RUNTIMES) + r")$")
+RUNTIME_COMMAND = ["python", "/opt/dapp/dapp_run.py"]
 METRICS_PORT = 9102
 METRICS_PATH = "/metrics"
 ALLOWED_USERS_ENV = "DAPP_ALLOWED_USERS"
@@ -129,7 +134,10 @@ class AppSpec(BaseModel):
 
     name: str
     description: str
-    image: str
+    image: str | None = Field(None, description="Container image; or use runtime + code + run instead")
+    runtime: str | None = Field(None, description="Run from source on a dapp runtime image, e.g. python-3.12")
+    code: str | None = Field(None, description="Folder with the app's source (relative to dapp.yaml), for runtime:")
+    run: str | None = Field(None, description="Command that starts the app inside the code folder, for runtime:")
     port: int = 8080
     tenant: str | None = None
     title: str | None = None
@@ -185,6 +193,28 @@ class AppSpec(BaseModel):
         return v
 
     @model_validator(mode="after")
+    def _image_or_runtime(self) -> AppSpec:
+        if bool(self.image) == bool(self.runtime):
+            raise ValueError("set either image: (a container image) or runtime: (run from source), not both")
+        if self.runtime:
+            if not RUNTIME_RE.match(self.runtime):
+                raise ValueError(f"runtime must be one of: {', '.join(RUNTIMES)}")
+            if not (self.code and self.run):
+                raise ValueError("runtime: needs code: (the source folder) and run: (the start command)")
+            if self.command:
+                raise ValueError("runtime apps start with run:, not command:")
+            if self.uses_login:
+                raise ValueError("sign-in for runtime apps isn't built yet: set public: true (anyone with the URL "
+                                 "can open it), or deploy an image with dapp_login")
+        elif self.code or self.run:
+            raise ValueError("code: and run: are for runtime: apps; with image: use command:")
+        return self
+
+    @property
+    def code_secret(self) -> str:
+        return f"{SECRET_PREFIX}{self.name}-code"
+
+    @model_validator(mode="after")
     def _tools_need_llm(self) -> AppSpec:
         if self.tools and not self.llm:
             raise ValueError("tools: needs llm: true (the app calls tools with its gateway key)")
@@ -217,7 +247,16 @@ class AppSpec(BaseModel):
 
 def load_spec(path: str | Path) -> AppSpec:
     data = yaml.safe_load(Path(path).read_text()) or {}
-    return AppSpec.model_validate(data)
+    spec = AppSpec.model_validate(data)
+    if spec.code and not Path(spec.code).is_absolute():  # code: is relative to the dapp.yaml, not the shell
+        spec = spec.model_copy(update={"code": str((Path(path).resolve().parent / spec.code).resolve())})
+    return spec
+
+
+def runtime_image(runtime: str) -> str:
+    """Pinned to a revision: a moving tag wouldn't roll pods that already run an older build."""
+    registry = os.environ.get("DAPP_RUNTIME_REGISTRY", "docker.io/tmdcio")
+    return f"{registry}/dapp-runtime:{runtime}-{RUNTIME_REVISION}"
 
 
 def oidc_client_id(tenant: str, app: str) -> str:
@@ -247,12 +286,17 @@ def render_app(spec: AppSpec, *, tenant: str, user_id: str | None, compute: str 
     if not compute:
         raise ValueError("compute is required (set `compute:` in dapp.yaml or --compute)")
 
+    if spec.runtime:
+        spec = spec.model_copy(update={"image": runtime_image(spec.runtime), "command": RUNTIME_COMMAND,
+                                       "env": {"DAPP_RUN": spec.run, **spec.env}})
     if not spec.command:
         raise ValueError(
             "command is required by the DataOS app schema: set `command:` (and `args:`) in dapp.yaml to the "
             "image's entrypoint, e.g. command: [/docker-entrypoint.sh] args: [nginx, -g, 'daemon off;']"
         )
     secrets = list(spec.secrets)
+    if spec.runtime and spec.code_secret not in secrets:
+        secrets.append(spec.code_secret)
     if spec.llm and spec.llm_secret not in secrets:
         secrets.append(spec.llm_secret)
     env = dict(spec.env)

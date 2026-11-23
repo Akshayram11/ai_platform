@@ -17,6 +17,7 @@ from typing import Any
 from .client import DataOS, DataOSError
 from .config import Context, current_context_name
 from .ctl import ApiWriter, Writer, make_writer
+from .pack import Packed, pack
 from .spec import (
     ALLOWED_ROLES_ENV,
     ALLOWED_USERS_ENV,
@@ -117,6 +118,7 @@ def flatten_logs(raw: Any) -> str:
 class DeployPlan:
     manifests: list[dict[str, Any]]
     notes: list[str]
+    code: Packed | None = None
 
 
 class Platform:
@@ -196,6 +198,13 @@ class Platform:
                     "DAPP_TOOLS": ",".join(spec.tools),
                     "DAPP_TOOLS_URL": f"{gateway_internal_url()}/mcp/{tenant}", **spec.env}})
                 notes.append(f"MCP tools via the gateway: {', '.join(spec.tools)}")
+        code = None
+        if spec.runtime:
+            code = pack(spec.code)
+            # the version in the app's env changes with the code, so a code change always rolls the app
+            spec = spec.model_copy(update={"env": {**spec.env, "DAPP_CODE_VERSION": code.sha256[:12]}})
+            notes.append(f"runtime {spec.runtime}: {len(code.files)} files, {code.size // 1024 + 1} KB packed, "
+                         f"version {code.sha256[:12]}, stored in secret {spec.code_secret}")
         if spec.uses_login:
             spec = self._keep_live_access(spec)
             notes.append(f"DataOS sign-in inside the app (dapp_login); allowed: owners + {spec.access.users or '-'}"
@@ -204,7 +213,7 @@ class Platform:
             notes.append("public: anyone with the URL can open this app")
         app = render_app(spec, tenant=tenant, user_id=self.ctx.user_id, fqdn=self.ctx.fqdn,
                          compute=compute or (None if spec.compute else os.environ.get("DAPP_DEFAULT_COMPUTE")))
-        return DeployPlan([app], notes)
+        return DeployPlan([app], notes, code)
 
     def _keep_live_access(self, spec: AppSpec) -> AppSpec:
         """`dapp access allow` edits the live app; a later deploy from dapp.yaml must not drop those people."""
@@ -238,6 +247,10 @@ class Platform:
                     data={"DAPP_LLM_KEY": key},  # the one key the app holds; the real provider keys stay in the gateway
                 ))
                 plan.notes.append("issued a new LLM gateway key" if existing is None else "rotated LLM gateway key")
+        if plan.code and not lint:
+            manifests.insert(0, render_secret(spec.code_secret, tenant=tenant, app=spec.name, data=plan.code.data,
+                                              description=f"dapp source code of {spec.name} "
+                                                          f"({plan.code.sha256[:12]})"))
         if spec.uses_login and not lint and self.client.get_resource("secret", spec.oidc_secret) is None:
             manifests.insert(0, render_secret(
                 spec.oidc_secret, tenant=tenant, app=spec.name,
