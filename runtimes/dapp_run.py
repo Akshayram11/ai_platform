@@ -5,11 +5,14 @@ base64 in the app's DataOS secret `dapp-<app>-code`, split into env-sized pieces
 
     DAPP_CODE_0, DAPP_CODE_1, ...   base64 pieces (each under Linux's 128 KiB limit for one env var)
     DAPP_CODE_SHA256                hash of the tar.gz, checked before anything runs
-    DAPP_RUN                        the app's command, e.g. "streamlit run app.py --server.port 8080"
+    DAPP_RUN                        the app's command, e.g. "streamlit run app.py --server.port $PORT"
 
 This launcher unpacks it into /home/app/code, installs requirements.txt (if any) on top of the libraries the image
 already has, starts the CPU/memory endpoint, then runs DAPP_RUN and stays its parent (so signals and the exit code
-pass through).
+pass through). $PORT in DAPP_RUN is the port the app must listen on.
+
+Private apps (DAPP_AUTH=oidc): the app listens on 8081 and dapp_proxy serves 8080 with DataOS sign-in in front of
+it (pages and websockets), so any web server gets sign-in without code changes. Public apps listen on 8080.
 """
 
 from __future__ import annotations
@@ -114,13 +117,32 @@ def main() -> int:
             say(f"metrics not started: {e}")
 
     # the app needn't carry its own packed copy (pieces and hash); DAPP_CODE_VERSION stays
-    child_env = {k: v for k, v in env.items() if not (k.startswith("DAPP_CODE_") and (k[10:].isdigit() or k == "DAPP_CODE_SHA256"))}
+    child_env = {k: v for k, v in env.items()
+                 if not (k.startswith("DAPP_CODE_") and (k[10:].isdigit() or k == "DAPP_CODE_SHA256"))}
+    private = env.get("DAPP_AUTH") == "oidc"
+    public_port = env.get("PORT", "8080")
+    child_env["PORT"] = "8081" if private else public_port
     child_env["PYTHONPATH"] = os.pathsep.join(p for p in (str(code), deps, child_env.get("PYTHONPATH", "")) if p)
-    say(f"starting: {run}")
-    proc = subprocess.Popen(shlex.split(run), cwd=code, env=child_env)
+    argv = [a.replace("$PORT", child_env["PORT"]).replace("${PORT}", child_env["PORT"]) for a in shlex.split(run)]
+    say(f"starting: {' '.join(argv)}")
+    procs = [subprocess.Popen(argv, cwd=code, env=child_env)]
+    if private:
+        proxy_env = {**env, "DAPP_UPSTREAM": "http://127.0.0.1:8081", "DAPP_METRICS": "0"}
+        say(f"DataOS sign-in in front of the app: proxy on :{public_port} -> :8081")
+        procs.append(subprocess.Popen([sys.executable, "-m", "uvicorn", "dapp_proxy:app", "--host", "0.0.0.0",
+                                       "--port", public_port, "--proxy-headers", "--log-level", "warning"],
+                                      env=proxy_env, cwd=str(Path(__file__).parent)))
     for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda s, _f: proc.send_signal(s))
-    return proc.wait()
+        signal.signal(sig, lambda s, _f: [p.send_signal(s) for p in procs])
+    while True:  # whichever stops first (app or proxy) ends the container, so DataOS restarts it whole
+        for p in procs:
+            code_ = p.poll()
+            if code_ is not None:
+                for other in procs:
+                    if other is not p and other.poll() is None:
+                        other.terminate()
+                return code_
+        time.sleep(0.5)
 
 
 if __name__ == "__main__":

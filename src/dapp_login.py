@@ -246,7 +246,35 @@ def protect(app, *, settings: Settings | None = None, public_paths: tuple[str, .
         await send({"type": "http.response.start", "status": status, "headers": hs})
         await send({"type": "http.response.body", "body": raw})
 
+    def caller(headers: dict[str, str]) -> dict | None:
+        ident = login.unseal(_cookies(headers).get(COOKIE, ""))
+        if ident is None:
+            auth = headers.get("authorization", "")
+            token = auth[7:].strip() if auth.lower().startswith("bearer ") else headers.get("apikey", "").strip()
+            if token:
+                ident = login.identify(token)
+        return ident
+
+    async def websocket(scope, receive, send):
+        """Websockets carry the same cookie: check it before the app sees the connection (a terminal is a shell)."""
+        path = scope.get("path", "")
+        rel = path[len(base):] if base and path.startswith(base) else path
+        if rel not in public_paths:
+            try:
+                ident = caller(_headers(scope))
+            except RuntimeError:
+                ident = None
+            if ident is None or not login.allowed(ident):
+                await receive()  # websocket.connect
+                return await send({"type": "websocket.close", "code": 4401 if ident is None else 4403})
+            scope = dict(scope)
+            scope["headers"] = [(k, v) for k, v in scope.get("headers", []) if k.lower() != b"x-dapp-user"]
+            scope["headers"].append((b"x-dapp-user", ident["id"].encode()))
+        return await app(scope, receive, send)
+
     async def middleware(scope, receive, send):
+        if scope["type"] == "websocket":
+            return await websocket(scope, receive, send)
         if scope["type"] != "http":
             return await app(scope, receive, send)
         path = scope.get("path", "")
@@ -282,15 +310,10 @@ def protect(app, *, settings: Settings | None = None, public_paths: tuple[str, .
             return await send_simple(send, 302, "", [("location", base + "/"),
                                                      ("set-cookie", _cookie(COOKIE, "", base, 0))])
 
-        ident = login.unseal(_cookies(headers).get(COOKIE, ""))
-        if ident is None:
-            auth = headers.get("authorization", "")
-            token = auth[7:].strip() if auth.lower().startswith("bearer ") else headers.get("apikey", "").strip()
-            if token:
-                try:
-                    ident = login.identify(token)
-                except RuntimeError as e:
-                    return await send_simple(send, 503, json.dumps({"error": str(e)}), ctype="application/json")
+        try:
+            ident = caller(headers)
+        except RuntimeError as e:
+            return await send_simple(send, 503, json.dumps({"error": str(e)}), ctype="application/json")
         if ident is None:
             if "text/html" in headers.get("accept", ""):
                 nxt = quote(path + ("?" + scope["query_string"].decode() if scope.get("query_string") else ""))

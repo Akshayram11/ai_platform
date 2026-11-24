@@ -13,7 +13,7 @@ ENV VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH DAPP_VENV_PYTHON=/opt/venv/bi
 COPY runtimes/python-base.txt /tmp/base.txt
 RUN uv venv /opt/venv && uv pip install --python /opt/venv/bin/python --no-cache -r /tmp/base.txt \
     && chown -R 10001:10001 /opt/venv && rm -rf /root/.cache
-COPY runtimes/dapp_run.py src/dapp_login.py src/dapp_metrics.py /opt/dapp/
+COPY runtimes/dapp_run.py src/dapp_login.py src/dapp_metrics.py src/dapp_proxy.py /opt/dapp/
 ENV PYTHONPATH=/opt/dapp
 USER 10001
 ENV UV_CACHE_DIR=/home/app/.cache/uv

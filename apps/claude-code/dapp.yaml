@@ -1,0 +1,24 @@
+# Claude Code in the browser on DataOS: ask it to build and deploy apps. Only the owner can open it: the terminal
+# acts with the owner's DataOS identity (DataOS gives the pod the owner's key) and has a shell.
+#
+#   dapp deploy -f apps/claude-code/dapp.yaml
+#   open https://<fqdn>/claude-code/      then sign in with your Claude account in the terminal (/login)
+#
+# Optional, instead of signing in: an Anthropic API key in the app's secret.
+#   dapp secret set claude-code anthropic --from-env-file apps/claude-code/.env --no-attach   # ANTHROPIC_API_KEY=...
+#   and add `secrets: [dapp-claude-code-anthropic]` below.
+name: claude-code
+title: Claude Code
+description: Claude Code in a browser terminal; builds and deploys DataOS apps with dapp
+image: docker.io/tmdcio/dapp-claude-code:0.1.1
+command: [/opt/claude/start.sh]
+port: 8080
+compute: engineering-compute
+path: /claude-code
+# private (DataOS sign-in); the proxy additionally lets only the owner in, even if someone is added to access
+metrics: true
+resources: {cpu: 250m, memory: 1Gi, cpuLimit: "2", memoryLimit: 2Gi}
+env:
+  ROOT_PATH: /claude-code
+  DATAOS_FQDN: poliks.instance.dataos.cloud
+  DAPP_DEFAULT_COMPUTE: engineering-compute

@@ -26,7 +26,7 @@ SECRET_PREFIX = "dapp-"
 # Secret with the app's OIDC client secret (key `clientSecret`, what Poros reads) and session key.
 OIDC_SECRET_SUFFIX = "-oidc"
 RUNTIMES = ("python-3.12",)
-RUNTIME_REVISION = "r3"   # bump with each runtime image build (runtimes/python.Dockerfile)
+RUNTIME_REVISION = "r4"   # bump with each runtime image build (runtimes/python.Dockerfile)
 RUNTIME_RE = re.compile(r"^(" + "|".join(re.escape(r) for r in RUNTIMES) + r")$")
 RUNTIME_COMMAND = ["python", "/opt/dapp/dapp_run.py"]
 METRICS_PORT = 9102
@@ -203,9 +203,6 @@ class AppSpec(BaseModel):
                 raise ValueError("runtime: needs code: (the source folder) and run: (the start command)")
             if self.command:
                 raise ValueError("runtime apps start with run:, not command:")
-            if self.uses_login:
-                raise ValueError("sign-in for runtime apps isn't built yet: set public: true (anyone with the URL "
-                                 "can open it), or deploy an image with dapp_login")
         elif self.code or self.run:
             raise ValueError("code: and run: are for runtime: apps; with image: use command:")
         return self

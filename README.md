@@ -171,6 +171,26 @@ dapp.yaml lists the steps. Tool URLs must be public https; plain http and privat
 gateway's `DAPP_TOOL_INTERNAL_HOSTS` (e.g. `demo-tools`, reached in-cluster). The dashboard's **Tools** page shows
 your tools, who may use them (add/remove there too) and their calls.
 
+## Apps from source (`runtime:`), no Docker
+
+```yaml
+runtime: python-3.12                     # pre-built dapp-runtime image: fastapi, streamlit, pandas, openai, ... inside
+code: ./app                              # packed into the secret dapp-<app>-code by dapp deploy (max ~700 KB)
+run: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.baseUrlPath <name>
+```
+
+The runtime unpacks the code, installs `requirements.txt` on top of what it has, and runs `run:`. Private apps
+(the default) get DataOS sign-in through `dapp_proxy`, which sits in front of any web server (pages and
+websockets), so Streamlit or anything else needs no code for it. A code change is live in about a minute.
+`examples/runtime-streamlit` is a demo; `runtimes/` has the image and launcher.
+
+## Claude Code on DataOS (`apps/claude-code`)
+
+A browser terminal running Claude Code, with `dapp` inside, to build and deploy apps by asking. Only the app's
+owner can open it (the terminal acts with the owner's DataOS identity, which DataOS gives the pod). The Anthropic
+key lives in the app's secret, see `apps/claude-code/dapp.yaml`. Files in the terminal's workspace don't survive
+a restart; deployed apps keep their own copy.
+
 ## Secrets as YAML (`deploy/secrets/`)
 
 | File | Who creates it | Holds |

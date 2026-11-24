@@ -6,9 +6,10 @@ name: runtime-demo
 description: Streamlit app running from source on dapp-runtime:python-3.12
 runtime: python-3.12
 code: ./app
-run: streamlit run app.py --server.port 8080 --server.address 0.0.0.0 --server.headless true --server.baseUrlPath runtime-demo --browser.gatherUsageStats false
+run: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true --server.baseUrlPath runtime-demo --browser.gatherUsageStats false
 compute: engineering-compute
 path: /runtime-demo
-public: true             # experiment: dapp's sign-in doesn't wrap non-ASGI apps (Streamlit) yet
+access:
+  users: []              # private: DataOS sign-in (dapp_proxy in front of Streamlit); add people with dapp access allow
 metrics: true
 resources: {cpu: 100m, memory: 256Mi, cpuLimit: "1", memoryLimit: 768Mi}

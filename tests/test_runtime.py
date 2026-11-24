@@ -56,12 +56,13 @@ def test_spec_rules(tmp_path):
         AppSpec(**{**ok, "runtime": "python-2.7"})
     with pytest.raises(ValueError, match="needs code"):
         AppSpec(**{**ok, "run": None})
-    with pytest.raises(ValueError, match="sign-in for runtime apps"):
-        AppSpec(**{**ok, "public": False})              # would look private but not be
+    private = render_app(AppSpec(**{**ok, "public": False}), tenant="t", user_id="alice",
+                         fqdn="x.dataos.cloud")["spec"]["service"]      # private runtime apps: sign-in via dapp_proxy
+    assert private["envs"]["DAPP_AUTH"] == "oidc" and private["http"]["oidcClient"]["enabled"]
     with pytest.raises(ValueError, match="are for runtime"):
         AppSpec(**BASE, image="i:1", command=["x"], run="y")
     m = render_app(AppSpec(**ok), tenant="t", user_id="alice")["spec"]["service"]
-    assert m["image"].endswith("/dapp-runtime:python-3.12-r3") and m["command"] == ["python", "/opt/dapp/dapp_run.py"]
+    assert m["image"].endswith("/dapp-runtime:python-3.12-r4") and m["command"] == ["python", "/opt/dapp/dapp_run.py"]
     assert m["envs"]["DAPP_RUN"] == "python app.py" and {"id": "dapp-rt-code"} in m["secrets"]
 
 
