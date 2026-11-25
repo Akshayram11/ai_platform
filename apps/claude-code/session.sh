@@ -1,13 +1,4 @@
 #!/bin/bash
-# One browser tab = one terminal session (ttyd starts this for each connection).
-cd "$HOME/work"
-printf '\n  Claude Code on DataOS, as %s (tenant %s).\n  Ask it to build and deploy an app; it uses `dapp`.\n  Files here are lost when this app restarts: deployed apps keep their own copy.\n  First time (or after a restart): Claude asks you to sign in with your Claude account, or type /login.\n\n' \
-  "${DATAOS_RUN_AS_USER:-?}" "${DATAOS_TENANT_ID:-?}"
-if ls "$HOME/.claude/projects"/* >/dev/null 2>&1; then
-  claude --continue || claude
-else
-  claude
-fi
-echo
-echo "Claude exited. This is a shell in $HOME/work; type 'claude' to start it again."
-exec bash -l
+# ttyd runs this for every browser connection. The work itself runs inside one tmux session, so a page refresh,
+# a closed tab or a network blip reattaches to the same running Claude instead of starting a new one.
+exec tmux -f /opt/claude/tmux.conf new-session -A -s claude -c "$HOME/work" /opt/claude/claude-loop.sh

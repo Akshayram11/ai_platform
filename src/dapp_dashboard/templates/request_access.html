@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Request access · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% block body %}
+<h1>Request access</h1>
+<p class="sub">to the app <b>{{ target }}</b>. You're signed in as <b>{{ s.user_id }}</b>.</p>
+<div class="panel" style="max-width:560px">
+{% if problem %}
+  <div class="empty">{{ problem }}</div>
+{% elif last and last.status == 'pending' %}
+  <p style="margin-top:0"><span class="pill warn">waiting</span> You asked on {{ last.created|when }}. The owner sees it on the app's Access tab; you can open the app once they approve and it restarts (about 40 seconds).</p>
+  {% if last.note %}<p class="muted">Your note: {{ last.note }}</p>{% endif %}
+  <form method="post" action="{{ root }}/request-access">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="app" value="{{ target }}">
+    <textarea name="note" maxlength="300" style="min-height:70px" placeholder="Update your note">{{ last.note }}</textarea>
+    <p style="margin:10px 0 0"><button>Update note</button></p>
+  </form>
+{% else %}
+  {% if last and last.status == 'approved' %}<p style="margin-top:0"><span class="pill ok">approved</span> You were given access. If the app still says "No access", wait for it to restart (about 40 seconds) and try again.</p>
+  {% elif last and last.status == 'denied' %}<p style="margin-top:0"><span class="pill bad">declined</span> The owner declined your last request. You can ask again with more detail.</p>{% endif %}
+  <form method="post" action="{{ root }}/request-access">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="app" value="{{ target }}">
+    <label style="font-size:13px;color:var(--muted)">Why do you need it? <span style="font-weight:400">(optional, up to 300 characters)</span>
+      <textarea name="note" maxlength="300" style="min-height:70px;margin-top:4px" placeholder="e.g. I'm on the sales team and need the dashboard"></textarea></label>
+    <p style="margin:12px 0 0"><button class="primary">Send request</button></p>
+  </form>
+{% endif %}
+</div>
+{% endblock %}

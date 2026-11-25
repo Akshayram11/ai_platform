@@ -25,8 +25,20 @@ def _q(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _selector(app: str, tenant: str) -> str:
-    return f'tenant="{_q(tenant)}",job_name="{_q(app)}"'
+def _selector(app: str, tenant: str, service: str | None = None) -> str:
+    """job_name is only the app's name, and other people's apps in the tenant may share it (their own workspaces):
+    service_name (the DataOS service behind this very app) keeps their pods out of our numbers."""
+    sel = f'tenant="{_q(tenant)}",job_name="{_q(app)}"'
+    return sel + (f',service_name="{_q(service)}"' if service else "")
+
+
+def service_of(runtime_detail: dict[str, Any] | None) -> str | None:
+    """The DataOS service name of an app (e.g. servicev2alphachatbotsvc-jwyp), from its runtime's pods."""
+    for node in (runtime_detail or {}).get("nodeDetails") or []:
+        name = ((node.get("labels") or {}).get("app") or "").strip()
+        if name.startswith("servicev2alpha"):
+            return name
+    return None
 
 
 def _alive(sel: str) -> str:
@@ -54,8 +66,8 @@ class Prometheus:
             return []
         return [(float(t), float(v)) for t, v in res[0]["values"]]
 
-    def app_now(self, app: str, tenant: str) -> dict[str, Any]:
-        sel = _selector(app, tenant)
+    def app_now(self, app: str, tenant: str, service: str | None = None) -> dict[str, Any]:
+        sel = _selector(app, tenant, service)
         alive = _alive(sel)
         gauge = lambda name: f"sum({name}{{{sel}}} and on(pod) {alive})"
         return {
@@ -72,8 +84,9 @@ class Prometheus:
             "errors_24h": self._scalar(f'sum(increase(dapp_http_requests_total{{{sel},code="5xx"}}[24h]))'),
         }
 
-    def app_series(self, app: str, tenant: str, start: float, end: float, step: str = "5m") -> dict[str, Any]:
-        sel = _selector(app, tenant)
+    def app_series(self, app: str, tenant: str, start: float, end: float, step: str = "5m",
+                   service: str | None = None) -> dict[str, Any]:
+        sel = _selector(app, tenant, service)
         return {
             "cpu_cores": self._range(f"sum(rate(dapp_container_cpu_usage_seconds_total{{{sel}}}[5m]))",
                                      start, end, step),
@@ -89,13 +102,21 @@ class GatewayUsage:
         self.http = httpx.Client(base_url=url.rstrip("/"), timeout=20, headers=auth_headers, transport=transport)
 
     def summary(self, *, app: str | None = None, since_hours: int = 24 * 30,
-                group_by: str = "app,model") -> dict[str, Any]:
+                group_by: str = "app,model", model: str | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {"since_hours": since_hours, "group_by": group_by}
         if app:
             params["app"] = app
+        if model:
+            params["model"] = model
         r = self.http.get("/admin/usage", params=params)
         r.raise_for_status()
         return r.json()
+
+    def models_served_by(self, app: str) -> list[str]:
+        """Local models (e.g. "small") that this DataOS app serves for the gateway."""
+        r = self.http.get("/healthz")
+        r.raise_for_status()
+        return sorted(m for m, host in (r.json().get("local_model_apps") or {}).items() if host == app)
 
     def list_keys(self) -> list[dict[str, Any]]:
         r = self.http.get("/admin/keys")
@@ -109,6 +130,11 @@ class GatewayUsage:
 
     def issue_key(self, app: str, tenant: str, *, rotate: bool = False) -> dict[str, Any]:
         r = self.http.post("/admin/keys", json={"app": app, "tenant": tenant, "rotate": rotate})
+        r.raise_for_status()
+        return r.json()
+
+    def issue_personal_key(self, tenant: str, *, rotate: bool = False) -> dict[str, Any]:
+        r = self.http.post("/admin/keys/personal", json={"tenant": tenant, "rotate": rotate})
         r.raise_for_status()
         return r.json()
 

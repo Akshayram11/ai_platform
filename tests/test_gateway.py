@@ -200,3 +200,72 @@ def test_cost_per_user_is_priced_per_model_then_rolled_up(tmp_path, monkeypatch)
     dave = {r["end_user"]: r for r in c.get("/admin/usage?group_by=end_user", headers=alice).json()["rows"]}["dave"]
     assert dave["cost_usd"] == 2.0 and dave["cost_partial"] is True                   # a lower bound, flagged
     assert c.get("/admin/usage?group_by=end_user", headers=alice).json()["total"]["cost_partial"] is True
+
+
+def test_local_model_goes_to_its_own_server(tmp_path, monkeypatch):
+    """model "small" is served inside DataOS: same app key, same metering, but never sent to OpenAI."""
+    seen = []
+
+    def both(req: httpx.Request) -> httpx.Response:
+        seen.append(req)
+        if req.url.host == "llm-small":
+            assert req.headers["authorization"] == "Bearer local-key"     # the local server's key, not OpenAI's
+            body = json.loads(req.content)
+            if body.get("stream"):
+                assert body["stream_options"]["include_usage"] is True
+                sse = (b'data: {"model":"small","choices":[{"delta":{"content":"hi"}}]}\n\n'
+                       b'data: {"model":"small","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n'
+                       b"data: [DONE]\n\n")
+                return httpx.Response(200, stream=httpx.ByteStream(sse), headers={"content-type": "text/event-stream"})
+            return httpx.Response(200, json={"model": "small", "choices": [],
+                                             "usage": {"prompt_tokens": 4, "completion_tokens": 2}})
+        return upstream(req)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real")
+    monkeypatch.setenv("DATAOS_FQDN", "x.dataos.cloud")
+    monkeypatch.setenv("DAPP_LOCAL_MODELS", '{"small": {"url": "http://llm-small:8080", "key_env": "LLM_SMALL_KEY"}}')
+    app = create_app(store=Store(f"sqlite:///{tmp_path}/g.db"), heimdall=FakeHeimdall(),
+                     upstream_transport=httpx.MockTransport(both), dataos_transport=httpx.MockTransport(dataos))
+    c = TestClient(app)
+    key = c.post("/admin/keys", json={"app": "chatbot", "tenant": "ai"}, headers={"apikey": "alice-key"}).json()["key"]
+    h = {"authorization": f"Bearer {key}"}
+    assert c.post("/openai/v1/chat/completions", json={"model": "small", "messages": []}, headers=h).status_code == 503
+    monkeypatch.setenv("LLM_SMALL_KEY", "local-key")
+    assert c.get("/healthz").json()["local_models"] == ["small"]
+    assert c.post("/openai/v1/chat/completions", json={"model": "small", "messages": []}, headers=h).status_code == 200
+    r = c.post("/openai/v1/chat/completions", json={"model": "small", "messages": [], "stream": True}, headers=h)
+    assert b"[DONE]" in r.content
+    assert str(seen[-1].url) == "http://llm-small:8080/v1/chat/completions"
+    c.post("/openai/v1/chat/completions", json={"model": "gpt-4o-mini", "messages": []}, headers=h)
+    assert seen[-1].url.host == "api.openai.com"                           # other models still go to OpenAI
+    rows = c.get("/admin/usage?group_by=provider", headers={"apikey": "alice-key"}).json()["rows"]
+    by = {r["provider"]: r for r in rows}
+    assert by["local"]["requests"] == 2 and by["local"]["input_tokens"] == 7 and by["openai"]["requests"] == 1
+    assert c.get("/healthz").json()["local_model_apps"] == {"small": "llm-small"}
+    assert "model small" in c.get("/", headers={"accept": "text/html"}).text    # the landing page names it
+    only = c.get("/admin/usage?model=small&group_by=app", headers={"apikey": "alice-key"}).json()
+    assert only["rows"] == [{**only["rows"][0], "app": "chatbot", "requests": 2}] and only["total"]["requests"] == 2
+
+
+def test_personal_key(tmp_path, monkeypatch):
+    """A person's own key for laptop use: app user:<them>, only they can make or revoke it."""
+    c = client(tmp_path, monkeypatch)
+    assert c.post("/admin/keys/personal", json={"tenant": "ai"}).status_code == 401
+    r = c.post("/admin/keys/personal", json={"tenant": "ai"}, headers={"apikey": "alice-key"}).json()
+    assert r["app"] == "user:alice" and r["key"].startswith("dapp_")
+    h = {"authorization": f"Bearer {r['key']}"}
+    assert c.post("/openai/v1/chat/completions", json={"model": "gpt-4o-mini", "messages": []},
+                  headers=h).status_code == 200
+    rows = c.get("/admin/usage?group_by=app", headers={"apikey": "alice-key"}).json()["rows"]
+    assert rows[0]["app"] == "user:alice" and rows[0]["requests"] == 1
+    # nobody else can make, rotate or revoke alice's personal key through the app-key endpoints
+    for body in ({"app": "user:alice", "tenant": "ai"}, {"app": "user:alice", "tenant": "ai", "rotate": True}):
+        assert c.post("/admin/keys", json=body, headers={"apikey": "bob-key"}).status_code == 403
+    assert c.delete("/admin/keys/ai/user:alice", headers={"apikey": "bob-key"}).status_code == 403
+    bob = c.post("/admin/keys/personal", json={"tenant": "ai", "rotate": True}, headers={"apikey": "bob-key"}).json()
+    assert bob["app"] == "user:bob"                                         # bob's rotate touches only bob's
+    assert c.post("/openai/v1/chat/completions", json={"model": "gpt-4o-mini", "messages": []},
+                  headers=h).status_code == 200
+    assert c.delete(f"/admin/keys/ai/user:alice/{r['prefix']}", headers={"apikey": "alice-key"}).json()["revoked"] == 1
+    assert c.post("/openai/v1/chat/completions", json={"model": "gpt-4o-mini", "messages": []},
+                  headers=h).status_code == 401

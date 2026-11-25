@@ -4,20 +4,24 @@
 #   dapp deploy -f apps/claude-code/dapp.yaml
 #   open https://<fqdn>/claude-code/      then sign in with your Claude account in the terminal (/login)
 #
-# Optional, instead of signing in: an Anthropic API key in the app's secret.
-#   dapp secret set claude-code anthropic --from-env-file apps/claude-code/.env --no-attach   # ANTHROPIC_API_KEY=...
-#   and add `secrets: [dapp-claude-code-anthropic]` below.
+# Staying signed in (the /login is lost whenever DataOS restarts or moves the pod): give the app a token.
+#   1. in the terminal here:  claude setup-token      (prints a token, valid for a year; copy it)
+#   2. on your laptop:        read -s "T?token: " && printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$T" > /tmp/cc.env \
+#                               && dapp secret set claude-code anthropic --from-env-file /tmp/cc.env --no-attach; rm -f /tmp/cc.env; unset T
+#   3. add `secrets: [dapp-claude-code-anthropic]` below and deploy again.
+# Or an Anthropic API key instead: the same secret with ANTHROPIC_API_KEY=... in the env file.
 name: claude-code
 title: Claude Code
 description: Claude Code in a browser terminal; builds and deploys DataOS apps with dapp
-image: docker.io/tmdcio/dapp-claude-code:0.1.1
+image: docker.io/tmdcio/dapp-claude-code:0.1.4
 command: [/opt/claude/start.sh]
 port: 8080
 compute: engineering-compute
 path: /claude-code
 # private (DataOS sign-in); the proxy additionally lets only the owner in, even if someone is added to access
 metrics: true
-resources: {cpu: 250m, memory: 1Gi, cpuLimit: "2", memoryLimit: 2Gi}
+resources: {cpu: 500m, memory: 2Gi, cpuLimit: "4", memoryLimit: 4Gi}
+secrets: [dapp-claude-code-anthropic]   # CLAUDE_CODE_OAUTH_TOKEN: stays signed in across restarts
 env:
   ROOT_PATH: /claude-code
   DATAOS_FQDN: poliks.instance.dataos.cloud

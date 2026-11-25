@@ -2,9 +2,9 @@
 #   dapp secret apply deploy/secrets/dapp-gateway-providers.yaml --env-file .env.gateway   # the provider keys
 #   dapp deploy -f deploy/gateway.dapp.yaml
 # .env.gateway (gitignored): OPENAI_API_KEY=..., optionally ANTHROPIC_API_KEY=..., DATABASE_URL=postgresql+psycopg://...
-name: dapp-llm-gateway          # DataOS names the workload from the app's creation; never toggle stateful/disk on a live app (see README)
+name: dapp-llm-gateway          # moving from inline disk to a Volume means recreating the app once (dapp rm, then deploy)
 description: LLM gateway for DataOS apps; meters tokens per app
-image: docker.io/tmdcio/dataos-apps:0.1.15
+image: docker.io/tmdcio/dataos-apps:0.1.21
 command: [dapp-gateway]
 port: 8080
 compute: engineering-compute
@@ -20,14 +20,16 @@ env:
   DATAOS_FQDN: poliks.instance.dataos.cloud
   DATABASE_URL: sqlite:////data/gateway.db     # overridden by the secret when it sets DATABASE_URL
   # MCP tools: plain-http in-cluster hosts the gateway may proxy to (everything else must be public https)
-  DAPP_TOOL_INTERNAL_HOSTS: demo-tools
+  DAPP_TOOL_INTERNAL_HOSTS: demo-tools,immortal-obj
+  # Models served inside DataOS: apps ask for them by name at /openai/... (apps/llm-small); key from dapp-gateway-local
+  DAPP_LOCAL_MODELS: '{"small": {"url": "http://llm-small:8080", "key_env": "LLM_SMALL_KEY"}}'
   # DAPP_GATEWAY_ADMINS: alice,bob             # may see everyone's usage
   # USD per 1M tokens, from OpenAI's model pages (gpt-6-luna: input 0.10, cached 0.01, cache write 0.125, output 0.50;
   # gpt-4o-mini: input 0.15, cached 0.075, output 0.60). Prompts over 272K tokens cost 2x on gpt-6-luna; not modelled.
   DAPP_PRICING: '{"gpt-6-luna": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125}, "gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075}}'
-disk:                           # app keys and usage survive restarts and redeploys (SQLite file lives here)
-  size: 1Gi
-  mountPath: /data
+volumes:                        # app keys, tools and usage (SQLite) on a DataOS Volume: survives updates and redeploys
+  - id: dapp-gateway-data       # dataos-ctl resource apply -f deploy/gateway-data.volume.yaml (once)
+    directory: /data
 secrets:
   - dapp-gateway-providers
   # DAPP_GATEWAY_SECRET_KEY: encrypts MCP tool credentials stored in the gateway. Losing it makes stored tool
@@ -35,3 +37,7 @@ secrets:
   #   python3 -c "from cryptography.fernet import Fernet; print('DAPP_GATEWAY_SECRET_KEY='+Fernet.generate_key().decode())" > .env.gateway-tools
   #   dapp secret set dapp-llm-gateway dapp-gateway-tools --from-env-file .env.gateway-tools --no-attach
   - dapp-gateway-tools
+  # LLM_SMALL_KEY: the same key as llm-small's LLAMA_API_KEY:
+  #   sed 's/^LLAMA_API_KEY=/LLM_SMALL_KEY=/' apps/llm-small/.env > .env.gateway-local
+  #   dapp secret set dapp-llm-gateway dapp-gateway-local --from-env-file .env.gateway-local --no-attach
+  - dapp-gateway-local

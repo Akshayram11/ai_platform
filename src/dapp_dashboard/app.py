@@ -15,12 +15,15 @@ Env:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import secrets
 import threading
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,8 +37,10 @@ from dapp.client import DataOS, DataOSError
 from dapp.config import Context, load_context
 from dapp.ctl import ApiWriter
 from dapp.platform import ID_RE, Platform, PlatformError, gateway_internal_url, gateway_public_url
-from dapp.usage import GatewayError, GatewayUsage, Prometheus, observability_url
+from dapp.usage import GatewayError, GatewayUsage, Prometheus, observability_url, service_of
 from dapp_login import SCOPES, Login, Settings
+from dapp_objects import Client as ObjectsClient
+from dapp_objects import ObjectsError
 
 log = logging.getLogger("dapp.dashboard")
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -89,9 +94,11 @@ def fmt_when(value: str | None) -> str:
     """2026-11-23T08:01:19.279926 (UTC, from the gateway) or ...Z (from DataOS) -> 23 Nov 2026, 08:01 UTC."""
     if not value:
         return "–"
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     try:
+        if isinstance(value, (int, float)):  # epoch seconds (immortal-obj)
+            return datetime.fromtimestamp(value, tz=UTC).strftime("%d %b %Y, %H:%M UTC")
         return datetime.fromisoformat(str(value).replace("Z", "")).strftime("%d %b %Y, %H:%M UTC")
     except ValueError:
         return str(value)
@@ -102,7 +109,7 @@ TEMPLATES.env.filters["when"] = fmt_when
 
 
 def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, platform_factory=None,
-               gateway_factory=None, prom_factory=None) -> FastAPI:
+               gateway_factory=None, prom_factory=None, objects_factory=None, app_objects_factory=None) -> FastAPI:
     """The *_factory arguments let tests put fakes behind the real routes; production leaves them out."""
     fqdn = os.environ.get("DATAOS_FQDN", "")
     default_tenant = os.environ.get("DATAOS_TENANT_ID", "")
@@ -201,7 +208,15 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         if request.url.path.startswith(request.scope.get("root_path", "") + "/api/"):
             return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
         if exc.status_code == 401:
-            return back(request, "/login")  # with OIDC this goes straight on to DataOS; no extra click
+            root = request.scope.get("root_path", "")
+            if request.method == "GET" and request.url.path.rstrip("/") != root.rstrip("/"):
+                from urllib.parse import (
+                    quote,  # with OIDC this goes on to DataOS, then back to the page asked for
+                )
+
+                here = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+                return back(request, f"/login?next={quote(here, safe='')}")
+            return back(request, "/login")
         resp = render(request, "error.html", session_of(request), status=exc.status_code, detail=exc.detail)
         resp.status_code = exc.status_code
         return resp
@@ -302,10 +317,20 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         compute = {}
         if prom_url:
             prom = prom_for(s)
-            for a in apps[:50]:
-                compute[a["name"]] = _safe(lambda a=a: prom.app_now(a["name"], a["tenant"]))
+            p = platform_for(s)
+
+            def now(a: dict) -> dict | None:  # only this app's own DataOS service: same-named apps of others share job_name
+                service = p.service_name(a["name"])
+                return prom.app_now(a["name"], a["tenant"], service) if service else None
+
+            shown = [a for a in apps[:50] if a.get("state") == "running"]
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                for a, res in zip(shown, pool.map(lambda a: _safe(lambda: now(a)), shown)):
+                    compute[a["name"]] = res
+        waiting = _safe(lambda: pending_counts([a["name"] for a in apps if a.get("owner") == s.user_id]))
+        waiting = {k: v for k, v in waiting.items() if isinstance(v, int)} if isinstance(waiting, dict) else {}
         return render(request, "index.html", s, apps=apps, err=err, all=all, llm=llm, by_app=by_app,
-                      compute=compute, has_prom=bool(prom_url))
+                      compute=compute, has_prom=bool(prom_url), waiting=waiting)
 
     @api.get("/apps/{name}", response_class=HTMLResponse)
     def app_page(request: Request, name: str, tab: str = "overview", days: int = 30):
@@ -316,11 +341,12 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         except (PlatformError, DataOSError) as e:
             raise HTTPException(404, str(e))
         ctx: dict[str, Any] = {"app": st, "tab": tab, "name": name, "has_prom": bool(prom_url)}
-        if tab == "overview" and prom_url:
+        service = service_of(st.get("runtime_detail"))
+        if tab == "overview" and prom_url and service:
             prom = prom_for(s)
-            ctx["compute"] = _safe(lambda: prom.app_now(name, st["tenant"]))
+            ctx["compute"] = _safe(lambda: prom.app_now(name, st["tenant"], service))
             end = time.time()
-            series = _safe(lambda: prom.app_series(name, st["tenant"], end - 86400, end, "15m"))
+            series = _safe(lambda: prom.app_series(name, st["tenant"], end - 86400, end, "15m", service))
             if isinstance(series, dict) and "error" not in series:
                 ctx["cpu_spark"] = sparkline(series.get("cpu_cores", []))
                 ctx["mem_spark"] = sparkline(series.get("memory_bytes", []))
@@ -341,6 +367,11 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
             ctx["by_user"] = by_user
         elif tab == "overview":
             ctx["llm"] = _safe(lambda: gateway_for(s).summary(app=name, group_by="model"))
+            # an app that serves a model for the gateway (llm-small): which apps called it and how much
+            served = _safe(lambda: gateway_for(s).models_served_by(name))
+            ctx["served"] = [{"model": m, "usage": _safe(lambda m=m: gateway_for(s).summary(
+                model=m, since_hours=days * 24, group_by="app"))} for m in served] if isinstance(served, list) else []
+            ctx["days"] = days
         if tab == "secrets":
             ctx["secrets"] = _safe(lambda: p.list_secrets(name))
         if tab == "access":
@@ -350,6 +381,8 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
                 al["everyone"] = "*" in al["users"]
                 al["extra_users"] = [u for u in al["users"] if u != "*" and u not in al["owners"]]
             ctx["allow"] = al
+            if isinstance(al, dict) and s.user_id in (al.get("owners") or []):
+                ctx["requests"] = _safe(lambda: pending_requests(name))
             people = _safe(p.list_users)  # for the picker; fine if the viewer may not list users
             ctx["people"] = [u for u in people if u["type"] == "person"] if isinstance(people, list) else []
         if tab == "logs":
@@ -589,6 +622,266 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
     @api.get("/healthz")
     def healthz():
         return {"ok": True}
+
+    # ------------------------------------------------------------------ immortal-obj storage
+    def objects_for(s: Session) -> ObjectsClient:
+        """immortal-obj through the gateway, as the signed-in person: their own and shared objects, nobody else's."""
+        if objects_factory:
+            return objects_factory(s)
+        return ObjectsClient(f"{gateway_internal_url()}/mcp/{s.tenant}/immortal-obj", s.token, timeout=20)
+
+    def storage_back(request: Request, ref: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
+        from urllib.parse import quote
+
+        return back(request, f"/storage/object?ref={quote(ref, safe='')}", msg=msg, err=err)
+
+    def storage_act(request: Request, ref: str, fn, ok: str) -> RedirectResponse:
+        try:
+            fn()
+        except (ObjectsError, OSError, ValueError) as e:
+            return storage_back(request, ref, err=str(e))
+        return storage_back(request, ref, msg=ok)
+
+    def quoted(name: str) -> str:
+        return '"' + name.replace('"', '""') + '"'
+
+    def inspect_object(c: ObjectsClient, ref: str, kind: str | None, table: str | None, file: str | None) -> dict:
+        """What the page shows for one object: its tables and rows (db) or its files (volume)."""
+        out: dict[str, Any] = {"kind": kind}
+        if kind in (None, "db"):
+            try:
+                db = c.open(ref)
+                names = [t["name"] for t in db.sql(
+                    "select name from sqlite_master where type = 'table' and name not like 'sqlite_%' order by name")]
+                if table not in names:  # default: the key-value table, unless it is empty and the object has its own tables
+                    others = [n for n in names if n != "_kv"]
+                    table = "_kv" if "_kv" in names else (others[0] if others else None)
+                    if table == "_kv" and others and not db.sql("select 1 as x from _kv limit 1"):
+                        table = others[0]
+                out.update(kind="db", tables=names, table=table)
+                if table:
+                    out["rows"] = db.sql(f"select * from {quoted(table)} limit 100")
+                    out["count"] = db.sql(f"select count(*) as n from {quoted(table)}")[0]["n"]
+                return out
+            except ObjectsError:
+                if kind == "db":
+                    raise
+        vol = c.volume(ref)
+        out.update(kind="volume", files=vol.ls())
+        if file:
+            data = vol.read(file)
+            out["file"] = {"path": file, "size": len(data), "text": None}
+            try:
+                out["file"]["text"] = data[:20000].decode()
+            except UnicodeDecodeError:
+                pass
+        return out
+
+    def storage_detail(request: Request, s: Session, ref: str, *, table: str | None = None, file: str | None = None,
+                       sql_query: str = "", sql_rows: list | None = None, sql_error: str | None = None):
+        c = objects_for(s)
+        try:
+            listing = c.list()
+        except (ObjectsError, OSError) as e:
+            return back(request, "/storage", err=str(e))
+        own = {o["name"]: o for o in listing.get("own", [])}
+        shared = {o["object"]: o for o in listing.get("shared_with_you", [])}
+        info = own.get(ref)
+        mode = "owner" if info else (shared[ref]["mode"] if ref in shared else None)
+        try:
+            view = inspect_object(c, ref, info["kind"] if info else None, table, file)
+        except (ObjectsError, OSError) as e:
+            return back(request, "/storage", err=f"{ref}: {e}")
+        return render(request, "storage_object.html", s, ref=ref, info=info, mode=mode, view=view,
+                      can_write=mode in ("owner", "write"), sql_query=sql_query, sql_rows=sql_rows, sql_error=sql_error)
+
+    @api.get("/storage", response_class=HTMLResponse)
+    def storage(request: Request):
+        s = need(request)
+        try:
+            listing, error = objects_for(s).list(), None
+        except (ObjectsError, OSError) as e:
+            listing, error = {"own": [], "shared_with_you": [], "you": ""}, str(e)
+        return render(request, "storage.html", s, listing=listing, storage_error=error)
+
+    @api.get("/storage/object", response_class=HTMLResponse)
+    def storage_object(request: Request, ref: str, table: str = "", file: str = ""):
+        s = need(request)
+        return storage_detail(request, s, ref, table=table or None, file=file or None)
+
+    @api.post("/storage/put")
+    def storage_put(request: Request, ref: str = Form(...), key: str = Form(...), value: str = Form(""),
+                    csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            parsed = value  # plain text is stored as a string
+        return storage_act(request, ref, lambda: objects_for(s).open(ref.strip()).put(key.strip(), parsed),
+                           f"Saved {key.strip()}")
+
+    @api.post("/storage/write")
+    def storage_write(request: Request, ref: str = Form(...), path: str = Form(...), content: str = Form(""),
+                      csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        return storage_act(request, ref, lambda: objects_for(s).volume(ref.strip()).write(path.strip(), content),
+                           f"Saved file {path.strip()}")
+
+    @api.post("/storage/sql", response_class=HTMLResponse)
+    def storage_sql(request: Request, ref: str = Form(...), query: str = Form(...), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        try:
+            rows = objects_for(s).open(ref).sql(query)
+        except (ObjectsError, OSError) as e:
+            return storage_detail(request, s, ref, sql_query=query, sql_error=str(e))
+        return storage_detail(request, s, ref, sql_query=query, sql_rows=rows)
+
+    @api.post("/storage/share")
+    def storage_share(request: Request, ref: str = Form(...), who: str = Form(...), mode: str = Form("read"),
+                      csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        return storage_act(request, ref, lambda: objects_for(s).open(ref).share(who.strip(), mode),
+                           f"Shared with {who.strip()} ({mode})")
+
+    @api.post("/storage/unshare")
+    def storage_unshare(request: Request, ref: str = Form(...), who: str = Form(...), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        return storage_act(request, ref, lambda: objects_for(s).call("unshare", {"object": ref, "who": who}),
+                           f"Stopped sharing with {who}")
+
+    @api.post("/storage/drop")
+    def storage_drop(request: Request, ref: str = Form(...), confirm: str = Form(""), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        if confirm != ref:
+            return storage_back(request, ref, err=f"Type {ref} to confirm")
+        try:
+            objects_for(s).open(ref).drop()
+        except (ObjectsError, OSError) as e:
+            return storage_back(request, ref, err=str(e))
+        return back(request, "/storage", msg=f"Deleted {ref}")
+
+    # ------------------------------------------------------------------ access requests
+    # Someone opens a private app they can't use, clicks "Request access" (it links here), and the app's owners see
+    # it on the app's Access tab, where Approve does what `dapp access allow` does. Requests live in the dashboard's
+    # own immortal-obj object; people only reach them through the checks below.
+    requests_ready = {"ok": False}
+
+    def requests_db():
+        """The `access-requests` object (None when this dashboard has no storage, i.e. no `objects: true`)."""
+        if app_objects_factory:
+            client = app_objects_factory()
+        else:
+            client = ObjectsClient()  # DAPP_OBJECTS_URL and DAPP_LLM_KEY, which `objects: true` sets
+            if not (client.url and client.key):
+                return None
+        db = client.open("access-requests")
+        if not requests_ready["ok"]:
+            db.sql("create table if not exists requests (id text primary key, app text, who text, note text, "
+                   "status text default 'pending', created text default current_timestamp, decided_by text, "
+                   "decided_at text)")
+            requests_ready["ok"] = True
+        return db
+
+    def pending_requests(name: str) -> list[dict]:
+        db = requests_db()
+        return db.sql("select id, who, note, created from requests where app = ? and status = 'pending' "
+                      "order by created, rowid", [name]) if db else []
+
+    def pending_counts(names: list[str]) -> dict[str, int]:
+        db = requests_db()
+        if not db or not names:
+            return {}
+        rows = db.sql("select app, count(*) as n from requests where status = 'pending' and app in "
+                      f"({','.join('?' * len(names))}) group by app", names)
+        return {r["app"]: r["n"] for r in rows}
+
+    @api.get("/request-access", response_class=HTMLResponse)
+    def request_access_page(request: Request, app: str = ""):
+        s = need(request)
+        if not ID_RE.match(app):
+            raise HTTPException(404, "unknown app")
+        last, problem = None, None
+        try:
+            db = requests_db()
+            if db is None:
+                problem = "Access requests aren't switched on for this dashboard. Ask the app's owner directly."
+            else:
+                rows = db.sql("select status, note, created from requests where app = ? and who = ? "
+                              "order by created desc, rowid desc limit 1", [app, s.user_id])
+                last = rows[0] if rows else None
+        except (ObjectsError, OSError) as e:
+            problem = f"Requests are unavailable right now: {e}"
+        return render(request, "request_access.html", s, target=app, last=last, problem=problem)
+
+    @api.post("/request-access")
+    def request_access(request: Request, app: str = Form(...), note: str = Form(""), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        if not ID_RE.match(app):
+            raise HTTPException(404, "unknown app")
+        dest, note = f"/request-access?app={app}", " ".join(note.split())[:300]
+        try:
+            db = requests_db()
+            if db is None:
+                return back(request, dest, err="Access requests aren't switched on for this dashboard.")
+            if db.sql("select id from requests where app = ? and who = ? and status = 'pending'", [app, s.user_id]):
+                db.sql("update requests set note = ? where app = ? and who = ? and status = 'pending'",
+                       [note, app, s.user_id])
+            else:
+                if db.sql("select count(*) as n from requests where who = ? and status = 'pending'",
+                          [s.user_id])[0]["n"] >= 20:
+                    return back(request, dest, err="You have too many open requests. Wait for answers first.")
+                db.sql("insert into requests (id, app, who, note) values (?, ?, ?, ?)",
+                       [uuid.uuid4().hex[:12], app, s.user_id, note])
+        except (ObjectsError, OSError) as e:
+            return back(request, dest, err=f"Could not send the request: {e}")
+        return back(request, dest, msg="Request sent. The owner sees it in the dashboard.")
+
+    def open_request(s: Session, name: str, rid: str):
+        """(platform, db, who) for a still-open request on an app the signed-in person owns."""
+        p = platform_for(s)
+        if s.user_id not in (p.allowlist(name).get("owners") or []):
+            raise HTTPException(403, "only an owner of this app can decide access requests")
+        db = requests_db()
+        rows = db.sql("select who, status from requests where id = ? and app = ?", [rid, name]) if db else []
+        if not rows or rows[0]["status"] != "pending":
+            raise ValueError("that request is no longer open")
+        return p, db, rows[0]["who"]
+
+    def decide(db, rid: str, status: str, by: str) -> None:
+        db.sql("update requests set status = ?, decided_by = ?, decided_at = current_timestamp where id = ?",
+               [status, by, rid])
+
+    @api.post("/apps/{name}/requests/{rid}/approve")
+    def request_approve(request: Request, name: str, rid: str, csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        dest = f"/apps/{name}?tab=access"
+        try:
+            p, db, who = open_request(s, name, rid)
+            p.allow(name, users=[who])
+            decide(db, rid, "approved", s.user_id)
+        except (DataOSError, PlatformError, GatewayError, ValueError, ObjectsError, OSError) as e:
+            return back(request, dest, err=str(e))
+        return back(request, dest, msg=f"Allowed {who}. The app restarts to apply it (about 40 seconds).")
+
+    @api.post("/apps/{name}/requests/{rid}/deny")
+    def request_deny(request: Request, name: str, rid: str, csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        dest = f"/apps/{name}?tab=access"
+        try:
+            _, db, who = open_request(s, name, rid)
+            decide(db, rid, "denied", s.user_id)
+        except (DataOSError, PlatformError, ValueError, ObjectsError, OSError) as e:
+            return back(request, dest, err=str(e))
+        return back(request, dest, msg=f"Declined the request from {who}.")
 
     def _act(request: Request, path: str, fn, ok: str) -> RedirectResponse:
         try:

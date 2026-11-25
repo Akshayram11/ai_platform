@@ -25,8 +25,9 @@ LLM_SECRET_SUFFIX = "-llm"
 SECRET_PREFIX = "dapp-"
 # Secret with the app's OIDC client secret (key `clientSecret`, what Poros reads) and session key.
 OIDC_SECRET_SUFFIX = "-oidc"
+OBJECTS_TOOL = "immortal-obj"   # the gateway tool behind `objects: true`
 RUNTIMES = ("python-3.12",)
-RUNTIME_REVISION = "r4"   # bump with each runtime image build (runtimes/python.Dockerfile)
+RUNTIME_REVISION = "r8"   # bump with each runtime image build (runtimes/python.Dockerfile)
 RUNTIME_RE = re.compile(r"^(" + "|".join(re.escape(r) for r in RUNTIMES) + r")$")
 RUNTIME_COMMAND = ["python", "/opt/dapp/dapp_run.py"]
 METRICS_PORT = 9102
@@ -127,6 +128,16 @@ class Disk(BaseModel):
     type: str = "disk"
 
 
+class Volume(BaseModel):
+    """An existing DataOS Volume resource mounted into the app. The Volume lives on its own: updating or deleting
+    the app leaves its data alone. One pod at a time can mount it, so the app runs a single replica."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    id: str = Field(pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", description="Volume resource name in this tenant")
+    directory: str = Field(pattern=r"^/[^\s]*$", description="Where it is mounted in the container")
+    read_only: bool = Field(False, alias="readOnly", description="DataOS defaults to read-only; dapp to read-write")
+
+
 class AppSpec(BaseModel):
     """What a person or agent writes in dapp.yaml."""
 
@@ -162,10 +173,14 @@ class AppSpec(BaseModel):
     metrics: bool = Field(False, description="The app runs dapp_metrics, so DataOS scrapes its CPU/memory (port 9102)")
     tools: list[str] = Field(default_factory=list,
                              description="Gateway MCP tools the app may call (needs llm: true: it uses its gateway key)")
+    objects: bool = Field(False, description="Give the app durable storage in immortal-obj (DAPP_OBJECTS_URL); "
+                                             "implies llm: true for the gateway key")
     owners: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     working_dirs: list[WorkingDir] = Field(default_factory=list, alias="workingDirs")
     disk: Disk | None = Field(None, description="Persistent disk; makes the app stateful (one replica per disk)")
+    volumes: list[Volume] = Field(default_factory=list,
+                                  description="Existing DataOS Volume resources to mount (data outlives the app)")
     image_pull_secret: str | None = Field(None, alias="imagePullSecret")
     hostname: str | None = None
 
@@ -213,6 +228,10 @@ class AppSpec(BaseModel):
 
     @model_validator(mode="after")
     def _tools_need_llm(self) -> AppSpec:
+        if self.objects:
+            self.llm = True                         # the app reaches immortal-obj with its gateway key
+            if OBJECTS_TOOL not in self.tools:
+                self.tools.append(OBJECTS_TOOL)
         if self.tools and not self.llm:
             raise ValueError("tools: needs llm: true (the app calls tools with its gateway key)")
         return self
@@ -268,6 +287,7 @@ def login_env(spec: AppSpec, *, tenant: str, fqdn: str, owners: list[str]) -> di
         "DAPP_OIDC_ISSUER": f"{base}/oidc",
         "DAPP_OIDC_CLIENT_ID": oidc_client_id(tenant, spec.name),
         "DAPP_PUBLIC_URL": f"{base}{spec.http_path}",
+        "DAPP_APP_NAME": spec.name,           # lets the "No access" page link to a request in the dashboard
         "DAPP_HEIMDALL_URL": f"{base}/heimdall",
         ALLOWED_USERS_ENV: ",".join(users),
         ALLOWED_ROLES_ENV: ",".join(sorted(set(spec.access.roles))),
@@ -339,6 +359,15 @@ def render_app(spec: AppSpec, *, tenant: str, user_id: str | None, compute: str 
             raise ValueError(f"workingDirs and disk both mount {clash[0]}: drop the workingDir, the disk replaces it")
         service["stateful"] = True  # DataOS rejects a disk on a stateless app
         service["disk"] = {"size": spec.disk.size, "type": spec.disk.type, "mountPath": spec.disk.mount_path}
+    if spec.volumes:
+        if spec.replicas != 1:
+            raise ValueError("an app with a volume runs a single replica (replicas: 1): one pod mounts it at a time")
+        if spec.disk:
+            raise ValueError("use either disk or volumes, not both")
+        if spec.autoscale:
+            raise ValueError("an app with a volume cannot autoscale: one pod mounts it at a time")
+        service["stateful"] = True  # DataOS: "volume cannot be attached to a stateless service"
+        service["volumes"] = [{"id": v.id, "directory": v.directory, "readOnly": v.read_only} for v in spec.volumes]
     if spec.metrics:
         service["metricEndpoint"] = {"port": METRICS_PORT, "path": METRICS_PATH}
     if spec.working_dirs:

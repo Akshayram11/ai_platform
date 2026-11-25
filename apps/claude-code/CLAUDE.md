@@ -39,6 +39,21 @@ Rules for the code:
   `$DAPP_TOOLS_URL/<tool>` with `Authorization: Bearer $DAPP_LLM_KEY` (MCP Streamable HTTP). See which tools exist
   with `dapp tool ls`.
 
+## Storage that survives: immortal-obj
+Apps lose their files on every restart. For anything an app must keep (chat history, settings, results), add
+`objects: true` to dapp.yaml (it implies `llm: true`) and use the helper that is already installed:
+```python
+from dapp_objects import objects
+db = objects.open("history")                          # this app's own object, created on first write
+db.put("settings", {"theme": "dark"}); db.get("settings")
+db.sql("create table if not exists msgs (who text, text text, at text default current_timestamp)")
+db.sql("insert into msgs (who, text) values (?, ?)", [user, text])
+rows = db.sql("select * from msgs where who = ? order by at desc limit 20", [user])   # list of dicts
+mine = objects.open("chat", for_user=user)            # one object per signed-in person
+```
+Objects belong to the app (`app:<name>`); nobody else sees them unless the app shares them (`db.share(user)`).
+Don't keep data in local files or SQLite on disk.
+
 ## Commands
 ```
 dapp deploy -f dapp.yaml --dry-run     # check first
@@ -56,4 +71,6 @@ dapp rm NAME --yes                     # only when the user asks
    private app or 200 for a public one; read `dapp logs NAME` if it crashes and fix the cause.
 3. Tell the user the URL `https://$DATAOS_FQDN/NAME/`, who can open it, and how to share it.
 
-Files in ~/work are lost when this terminal app restarts; deployed apps keep their own copy of their code.
+~/work is saved every 30 s to your immortal-obj volume `workspace` (and restored when this terminal restarts),
+except caches, virtualenvs, .git, .env/keys, databases and files over 700 KB. Your Claude conversations are saved too
+(`claude-sessions`); the Claude sign-in is not, so sign in again after a restart.

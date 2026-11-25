@@ -72,6 +72,18 @@ def test_prometheus_queries_are_scoped_to_tenant_and_app():
     assert now["cpu_cores"] == 2.5 and now["memory_bytes"] == 2.5
     assert seen and all('tenant="engineering"' in q and 'job_name="my\\"app"' in q for q in seen)
     assert any("changes(dapp_container_uptime_seconds" in q for q in seen)  # only pods that are still alive
+    seen.clear()
+    p.app_now("chatbot", "engineering", "servicev2alphachatbotsvc-jwyp")   # same-named apps of others stay out
+    assert seen and all('service_name="servicev2alphachatbotsvc-jwyp"' in q for q in seen)
+
+
+def test_service_of_reads_the_runtime():
+    from dapp.usage import service_of
+
+    rt = {"nodeDetails": [{"name": "servicev2alphachatbotsvc-jwyp-858db5f84c-sh692",
+                           "labels": {"app": "servicev2alphachatbotsvc-jwyp"}}]}
+    assert service_of(rt) == "servicev2alphachatbotsvc-jwyp"
+    assert service_of({}) is None and service_of(None) is None and service_of({"nodeDetails": [{"labels": {}}]}) is None
 
 
 def test_app_page_renders_with_and_without_compute():

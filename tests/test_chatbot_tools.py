@@ -123,3 +123,124 @@ def test_spec_tools_need_llm_and_reach_the_env():
         "spec"]["service"]["envs"]
     assert envs["DAPP_TOOLS"] == "dataproduct-mcp"
     assert envs["DAPP_TOOLS_URL"] == "http://dapp-gateway:8080/mcp/engineering"
+
+
+def test_model_switch(chatbot, monkeypatch):
+    """The page may pick another listed model; it gets a plain chat (no reasoning setting, no tools)."""
+    fake = types.ModuleType("openai")
+    fake.OpenAI = object
+    monkeypatch.setitem(sys.modules, "openai", fake)    # the example's own dependency; not installed here
+    monkeypatch.delenv("DAPP_AUTH", raising=False)
+    monkeypatch.delenv("DAPP_TOOLS", raising=False)
+    monkeypatch.setenv("DAPP_METRICS", "0")
+    sys.modules.pop("app", None)
+    import app as chatbot
+    calls = []
+
+    class Fake:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    calls.append(kw)
+                    return iter([])
+
+    monkeypatch.setattr(chatbot, "MODELS", [chatbot.MODEL, "small"])
+    monkeypatch.setattr(chatbot, "REASONING_EFFORT", "low")
+    monkeypatch.setattr(chatbot, "TOOLS", None)
+    monkeypatch.setattr(chatbot, "_client", Fake())
+    from fastapi.testclient import TestClient
+    c = TestClient(chatbot.app)
+    assert c.get("/api/models").json() == {"default": chatbot.MODEL, "models": [chatbot.MODEL, "small"]}
+    c.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}], "model": "small"})
+    assert calls[-1]["model"] == "small" and "extra_body" not in calls[-1]
+    c.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert calls[-1]["model"] == chatbot.MODEL and calls[-1]["extra_body"] == {"reasoning_effort": "low"}
+    assert c.post("/api/chat", json={"messages": [], "model": "gpt-5-pro"}).status_code == 400
+
+
+class FakeObjects:
+    """What dapp_objects.objects does, on in-memory SQLite, one database per (name, person)."""
+
+    def __init__(self):
+        import sqlite3
+        self.sqlite3, self.dbs, self.shared = sqlite3, {}, []
+
+    def open(self, name, for_user=None):
+        db = self.dbs.setdefault((name, for_user), self.sqlite3.connect(":memory:", check_same_thread=False))
+        shared = self.shared
+
+        class Obj:
+            def sql(self, query, params=None):
+                cur = db.execute(query, params or [])
+                cols = [d[0] for d in cur.description or []]
+                rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+                db.commit()
+                return rows
+
+            def share(self, who, mode="read"):
+                shared.append((name, for_user, who))
+        return Obj()
+
+
+def history_bot(monkeypatch, objs):
+    fake = types.ModuleType("openai")
+    fake.OpenAI = object
+    monkeypatch.setitem(sys.modules, "openai", fake)
+    for v in ("DAPP_AUTH", "DAPP_TOOLS", "DAPP_LLM_KEY"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("DAPP_METRICS", "0")
+    sys.modules.pop("app", None)
+    import app as bot
+
+    class Fake:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    return iter([NS(choices=[NS(delta=NS(content="Hi!"))])])
+
+    monkeypatch.setattr(bot, "objects", objs)
+    monkeypatch.setattr(bot, "HISTORY", objs is not None)
+    monkeypatch.setattr(bot, "TOOLS", None)
+    monkeypatch.setattr(bot, "_client", Fake())
+    bot._ready.clear()
+    from fastapi.testclient import TestClient
+    return TestClient(bot.app)
+
+
+def test_history_is_saved_per_person(chatbot, monkeypatch):
+    objs = FakeObjects()
+    c = history_bot(monkeypatch, objs)
+    carol = {"x-dapp-user": "carol"}
+    first = [{"role": "user", "content": "hello  there"}]
+    r = c.post("/api/chat", json={"messages": first}, headers=carol)
+    cid = r.headers["x-chat-id"]
+    assert r.text == "Hi!"
+    again = [*first, {"role": "assistant", "content": "Hi!"}, {"role": "user", "content": "again"}]
+    assert c.post("/api/chat", json={"messages": again, "chat_id": cid}, headers=carol).headers["x-chat-id"] == cid
+
+    listed = c.get("/api/history", headers=carol).json()
+    assert listed["enabled"] and [x["title"] for x in listed["chats"]] == ["hello there"]   # one chat, titled by its start
+    got = c.get(f"/api/history/{cid}", headers=carol).json()["messages"]
+    assert [(m["role"], m["content"]) for m in got] == [
+        ("user", "hello  there"), ("assistant", "Hi!"), ("user", "again"), ("assistant", "Hi!")]
+    assert c.get("/api/history", headers={"x-dapp-user": "dave"}).json()["chats"] == []      # nobody else's
+    assert ("chat", "carol", "carol") in objs.shared                    # shared back, so carol can open it in Storage
+    assert c.delete(f"/api/history/{cid}", headers=carol).json() == {"deleted": cid}
+    assert c.get("/api/history", headers=carol).json()["chats"] == []
+
+
+def test_chat_still_works_when_history_cannot_be_saved(chatbot, monkeypatch):
+    class Broken:
+        def open(self, *a, **k):
+            from dapp_objects import ObjectsError
+            raise ObjectsError("immortal-obj: HTTP 502")
+
+    c = history_bot(monkeypatch, Broken())
+    r = c.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}, headers={"x-dapp-user": "carol"})
+    assert r.status_code == 200 and r.text == "Hi!" and "x-chat-id" not in r.headers
+    assert c.get("/api/history", headers={"x-dapp-user": "carol"}).json()["enabled"] is False
+    off = history_bot(monkeypatch, None)
+    assert off.get("/api/history").json() == {"enabled": False, "chats": []}
+    assert off.get("/api/history/x").status_code == 404

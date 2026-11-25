@@ -37,6 +37,7 @@ packages = ["src/dapp", "src/dapp_gateway", "src/dapp_dashboard"]
 "src/dapp_login.py" = "dapp_login.py"
 "src/dapp_metrics.py" = "dapp_metrics.py"
 "src/dapp_proxy.py" = "dapp_proxy.py"
+"src/dapp_objects.py" = "dapp_objects.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

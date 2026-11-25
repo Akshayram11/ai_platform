@@ -100,6 +100,21 @@ def test_quoting_round_trips_and_never_stacks():
     assert split_ids('"\\"*,x\\"",*,alice,') == ["*", "alice"]  # junk from the old bug is dropped
 
 
+def test_volume_mounts_read_write_and_stays_single_pod():
+    base = {"public": True}
+    vol = [{"id": "immortal-obj", "directory": "/data"}]
+    svc = render_app(spec(**base, volumes=vol), tenant="ai", user_id="a")["spec"]["service"]
+    # DataOS refuses a volume on a stateless service, and defaults volumes to read-only
+    assert svc["stateful"] is True
+    assert svc["volumes"] == [{"id": "immortal-obj", "directory": "/data", "readOnly": False}]
+    with pytest.raises(ValueError, match="single replica"):
+        render_app(spec(**base, replicas=2, volumes=vol), tenant="ai", user_id="a")
+    with pytest.raises(ValueError, match="not both"):
+        render_app(spec(**base, volumes=vol, disk={"size": "1Gi", "mountPath": "/x"}), tenant="ai", user_id="a")
+    with pytest.raises(ValueError):
+        spec(**base, volumes=[{"id": "Bad_Name", "directory": "/data"}])
+
+
 def test_disk_makes_the_app_stateful_and_is_validated():
     base = {"public": True}
     svc = render_app(spec(**base, disk={"size": "1Gi", "mountPath": "/data"}), tenant="ai", user_id="a")["spec"]["service"]

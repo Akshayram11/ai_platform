@@ -66,3 +66,19 @@ def test_middleware_flow():
     assert status == 200 and body == b"hi alice"
     bob = f"dapp_auth={lg.seal({'id': 'bob', 'tags': []})}"
     assert call(app, "/chatbot/", [("cookie", bob)])[0] == 403
+
+
+def test_no_access_page_links_to_a_request():
+    bob = lambda lg: f"dapp_auth={lg.seal({'id': 'bob', 'tags': []})}"
+    s = settings()                                    # DAPP_PUBLIC_URL https://x/chatbot: the name and dashboard follow from it
+    assert (s.app_name, s.dashboard_url) == ("chatbot", "https://x/dapp")
+    app = dapp_login.protect(inner, settings=s)
+    _, _, page = call(app, "/chatbot/", [("cookie", bob(dapp_login.Login(s)))])
+    assert b"https://x/dapp/request-access?app=chatbot" in page and b"Request access" in page
+    named = settings(DAPP_APP_NAME="sales-dash", DAPP_DASHBOARD_URL="https://x/apps/")
+    _, _, page = call(dapp_login.protect(inner, settings=named), "/chatbot/", [("cookie", bob(dapp_login.Login(named)))])
+    assert b"https://x/apps/request-access?app=sales-dash" in page
+    nested = settings(DAPP_PUBLIC_URL="https://x/team/chatbot")       # name unknown for a nested path: no link
+    _, _, page = call(dapp_login.protect(inner, settings=nested), "/team/chatbot/",
+                      [("cookie", bob(dapp_login.Login(nested)))])
+    assert b"Request access" not in page

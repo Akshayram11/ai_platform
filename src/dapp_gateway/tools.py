@@ -45,7 +45,7 @@ log = logging.getLogger("dapp.gateway.tools")
 
 NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?$")
 HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
-ALLOW_RE = re.compile(r"^(\*|app:[a-z0-9-]{1,48}|[A-Za-z0-9_.@-]{1,128})$")
+ALLOW_RE = re.compile(r"^(\*|app:\*|app:[a-z0-9-]{1,48}|[A-Za-z0-9_.@-]{1,128})$")
 FORWARD_REQ = ("content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id")
 FORWARD_RESP = ("content-type", "mcp-session-id", "cache-control")
 MAX_BODY = 1_000_000          # a JSON-RPC request; tool results can be bigger, they are streamed back untouched
@@ -249,6 +249,8 @@ def mount_tools(api: FastAPI, *, store: Store, heimdall: Heimdall | None, caller
             k = store.lookup(token)
             if k is None:
                 raise HTTPException(401, "invalid or revoked dapp app key")
+            if k.app.startswith("user:"):
+                raise HTTPException(403, "a personal LLM key can't call MCP tools; use your DataOS API key")
             if k.tenant != t.tenant or not ({f"app:{k.app}", "app:*"} & set(allowed(t))):
                 raise HTTPException(403, f"app {k.app} may not use tool {t.tenant}/{t.name}; its owner can allow "
                                          f"it with: dapp tool allow {t.name} app:{k.app}")
@@ -275,7 +277,11 @@ def mount_tools(api: FastAPI, *, store: Store, heimdall: Heimdall | None, caller
         reqs = jsonrpc_requests(body) if request.method == "POST" else []
 
         headers = {h: request.headers[h] for h in FORWARD_REQ if h in request.headers}
-        headers["x-dapp-user"] = end_user or caller_id   # tell the tool who is calling (it can't verify; we did)
+        # tell the tool who is calling (it can't verify; we did). Clients can't set these: only FORWARD_REQ passes.
+        headers["x-dapp-user"] = end_user or caller_id
+        headers["x-dapp-caller"] = caller_id              # a DataOS user id, or app:<name> for an app's gateway key
+        if end_user:
+            headers["x-dapp-end-user"] = end_user         # the person an app says it acts for (the app vouches)
         if t.auth_header and t.auth_secret:
             headers[t.auth_header] = vault.open(t.auth_secret)
         started = time.monotonic()

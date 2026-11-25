@@ -13,6 +13,9 @@
   <div class="kpi"><div class="label">Apps</div><div class="value">{{ apps|length }}</div></div>
   {% set running = apps|selectattr('state','equalto','running')|list|length %}
   <div class="kpi"><div class="label">Running</div><div class="value">{{ running }}</div></div>
+  {% set pend = waiting or {} %}
+  {% if pend %}<div class="kpi"><div class="label">Access requests</div><div class="value">{{ pend.values()|sum }}</div>
+    <div class="muted" style="font-size:12px">waiting for you</div></div>{% endif %}
   {% if llm and not llm.error %}
   <div class="kpi"><div class="label">LLM tokens · 30 days</div><div class="value">{{ (llm.total.input_tokens + llm.total.output_tokens)|num }}</div></div>
   <div class="kpi"><div class="label">LLM cost · 30 days</div><div class="value">{{ ('$%.4f' if llm.total.cost_usd < 1 else '$%.2f')|format(llm.total.cost_usd) if llm.total.cost_usd is not none else '–' }}</div></div>
@@ -36,7 +39,7 @@
     <td>{{ status_pill(a) }}{% if a.error %}<div class="muted" style="font-size:12px">{{ a.error[:120] }}</div>{% endif %}</td>
     <td>{{ a.owner }}</td>
     {% set ac = a.access %}
-    <td style="white-space:nowrap">{% if ac %}{% if ac.mode == 'login' %}{% if ac.everyone %}<span class="pill warn" title="Anyone signed in to DataOS can open it">everyone</span>{% else %}{{ ac.people }} {{ 'person' if ac.people == 1 else 'people' }}{% if ac.roles %} + {{ ac.roles }} {{ 'role' if ac.roles == 1 else 'roles' }}{% endif %}{% endif %}{% elif ac.mode == 'public' %}<span class="pill warn" title="No sign-in in front of the app">public</span>{% else %}<span class="muted">DataOS policy</span>{% endif %} · {% endif %}<a href="{{ request.scope.root_path }}/apps/{{ a.name }}?tab=access">Manage</a></td>
+    <td style="white-space:nowrap">{% if ac %}{% if ac.mode == 'login' %}{% if ac.everyone %}<span class="pill warn" title="Anyone signed in to DataOS can open it">everyone</span>{% else %}{{ ac.people }} {{ 'person' if ac.people == 1 else 'people' }}{% if ac.roles %} + {{ ac.roles }} {{ 'role' if ac.roles == 1 else 'roles' }}{% endif %}{% endif %}{% elif ac.mode == 'public' %}<span class="pill warn" title="No sign-in in front of the app">public</span>{% else %}<span class="muted">DataOS policy</span>{% endif %} · {% endif %}<a href="{{ request.scope.root_path }}/apps/{{ a.name }}?tab=access">Manage</a>{% if pend.get(a.name) %} <a class="pill warn" href="{{ request.scope.root_path }}/apps/{{ a.name }}?tab=access" title="Waiting for your answer">{{ pend[a.name] }} request{{ 's' if pend[a.name] > 1 }}</a>{% endif %}</td>
     {% if has_prom %}<td class="num">{{ c.cpu_cores|num(3) if c and not c.error else '–' }}</td><td class="num">{{ c.memory_bytes|bytes if c and not c.error else '–' }}</td>{% endif %}
     <td class="num">{{ (u.input_tokens + u.output_tokens)|num if u else '–' }}</td>
     <td>{% if a.url %}<a href="{{ a.url }}" target="_blank" rel="noopener">open</a>{% endif %}</td>

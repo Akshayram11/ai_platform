@@ -1,0 +1,35 @@
+# llm-small: a small LLM (Qwen2.5-0.5B-Instruct, Q4_K_M, ~0.5 GB) served on DataOS CPUs by llama.cpp, used through the
+# dapp gateway as model "small". Prompts and answers never leave DataOS.
+#
+# Set up once:
+#   dataos-ctl resource apply -f apps/llm-small/models.volume.yaml           # the model file lives here
+#   python3 -c 'import secrets; print("LLAMA_API_KEY=" + secrets.token_urlsafe(32))' > apps/llm-small/.env   # gitignored
+#   dapp secret set llm-small key --from-env-file apps/llm-small/.env --no-attach
+#   dapp deploy -f apps/llm-small/dapp.yaml                                  # first start downloads the model (~1 min)
+# The gateway gets the same key (LLM_SMALL_KEY in its secret dapp-gateway-local) and
+#   DAPP_LOCAL_MODELS: '{"small": {"url": "http://llm-small:8080", "key_env": "LLM_SMALL_KEY"}}'
+name: llm-small
+title: Small LLM (Qwen2.5-0.5B)
+description: Qwen2.5-0.5B-Instruct on CPU via llama.cpp; reached through the dapp gateway as model "small"
+image: docker.io/tmdcio/llm-small:b12679-m1
+command: [/opt/dapp/start.sh]    # dapp_metrics in the background, then llama-server
+args: [-hf, "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M", --alias, small, --host, 0.0.0.0, --metrics]
+port: 8080
+metrics: true                   # CPU/memory on the dashboard (dapp_metrics on port 9102)
+compute: engineering-compute
+hostname: llm-small             # the gateway reaches it in-cluster at http://llm-small:8080
+path: /llm-small
+# Private, two locks: DataOS' ingress (Kong) refuses calls from outside, and every call needs LLAMA_API_KEY, which
+# only the gateway has. The gateway reaches it inside DataOS at http://llm-small:8080, which never passes the ingress.
+public: false
+login: false                    # llama.cpp has no dapp_login, so DataOS' ingress does the refusing
+resources: {cpu: 500m, memory: 1Gi, cpuLimit: "2", memoryLimit: 1536Mi}
+secrets: [dapp-llm-small-key]
+env:                            # numbers go here, not in args: DataOS rejects numeric-looking args
+  LLAMA_ARG_PORT: "8080"
+  LLAMA_ARG_CTX_SIZE: "4096"    # tokens of context per request
+  LLAMA_ARG_N_PARALLEL: "1"     # one request at a time (CPU); others wait their turn
+  LLAMA_ARG_THREADS: "2"        # = cpuLimit
+volumes:
+  - id: llm-models              # keeps the downloaded model across restarts and updates
+    directory: /models

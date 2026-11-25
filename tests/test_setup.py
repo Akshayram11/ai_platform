@@ -155,3 +155,21 @@ def test_doctor_tells_the_user_to_run_dataos_ctl_login(clean, monkeypatch):
     monkeypatch.setenv("DATAOS_ACCESS_TOKEN", _jwt(-600))
     last = run_checks(transport=_doctor_transport())[-1]
     assert last["check"] == "credentials" and not last["ok"] and "dataos-ctl login" in last["hint"]
+
+
+def test_init_claude_code_template(tmp_path, monkeypatch):
+    import yaml
+    from typer.testing import CliRunner
+
+    from dapp.cli import app
+    from dapp.spec import AppSpec
+
+    monkeypatch.setenv("DATAOS_FQDN", "x.dataos.cloud")
+    monkeypatch.setenv("DATAOS_TENANT_ID", "engineering")
+    out = tmp_path / "dapp.yaml"
+    r = CliRunner().invoke(app, ["init", "claude-alice", "--template", "claude-code", "-f", str(out)])
+    assert r.exit_code == 0, r.output
+    spec = AppSpec.model_validate(yaml.safe_load(out.read_text()))
+    assert spec.path == "/claude-alice" and spec.env["ROOT_PATH"] == "/claude-alice"
+    assert spec.env["DATAOS_FQDN"] == "x.dataos.cloud" and spec.uses_login and not spec.public   # private, owner-only
+    assert "dapp-claude-code:" in spec.image

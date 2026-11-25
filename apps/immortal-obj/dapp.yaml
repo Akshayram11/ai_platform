@@ -1,0 +1,27 @@
+# immortal-obj: durable objects for agents and apps, on the DataOS Volume `immortal-obj`.
+# Nobody calls it directly: it answers only the dapp gateway (TOOL_TOKEN), which checks who is calling and records
+# every call. Set up once:
+#   dataos-ctl resource apply -f deploy/immortal-obj.volume.yaml                    # the Volume (5Gi, grow later)
+#   python3 -c 'import secrets; print("TOOL_TOKEN=" + secrets.token_urlsafe(32))' > apps/immortal-obj/.env   # gitignored
+#   dapp secret set immortal-obj token --from-env-file apps/immortal-obj/.env --no-attach
+#   dapp deploy -f apps/immortal-obj/dapp.yaml
+#   (set -a; . apps/immortal-obj/.env; set +a; dapp tool add immortal-obj --url http://immortal-obj:8080/mcp --auth-env TOOL_TOKEN \
+#        -d "durable objects: key-value + SQLite that are yours")
+#   dapp tool allow immortal-obj "*" "app:*"       # everyone and every app; each sees only its own objects
+name: immortal-obj
+description: Durable objects (key-value + SQLite) for agents and apps, on a DataOS Volume
+runtime: python-3.12
+code: ./app
+run: python server.py
+compute: engineering-compute
+hostname: immortal-obj          # the gateway reaches it in-cluster at http://immortal-obj:8080/mcp
+path: /immortal-obj
+public: true                    # no DataOS sign-in on the server itself: it refuses every call without TOOL_TOKEN
+resources: {cpu: 100m, memory: 256Mi, cpuLimit: "1", memoryLimit: 512Mi}
+secrets: [dapp-immortal-obj-token]
+env:
+  IMMORTAL_DATA: /data/immortal-obj
+  TOOL_ALLOWED_HOSTS: immortal-obj:8080,immortal-obj
+volumes:
+  - id: immortal-obj            # a DataOS Volume: survives updates, deletes and redeploys of this app
+    directory: /data

@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}{{ ref }} · Storage · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% set base_url = root ~ '/storage/object?ref=' ~ (ref|urlencode) %}
+{% block body %}
+<p class="sub" style="margin-bottom:8px"><a href="{{ root }}/storage">← Storage</a></p>
+<div class="row" style="align-items:center;margin-bottom:4px">
+  <h1 style="margin:0">{{ ref }}</h1>
+  <span class="kind">{{ view.kind }}</span>
+  {% if mode == 'owner' %}<span class="pill ok">yours</span>{% elif mode %}<span class="pill {{ 'warn' if mode == 'write' else 'info' }}">shared with you · {{ mode }}</span>{% endif %}
+</div>
+<p class="sub">
+  {% if view.kind == 'db' %}A small SQLite database. Key-value pairs live in the table <code>_kv</code>; you can add your own tables.
+  {% else %}A folder of files. Up to 700 KB per file.{% endif %}
+  {% if info %}Updated {{ info.updated|when }}.{% endif %}
+</p>
+
+{% if view.kind == 'db' %}
+<div class="tabs">
+  {% for t in view.tables %}<a href="{{ base_url }}&table={{ t|urlencode }}" class="{{ 'on' if t == view.table }}">{{ t }}</a>{% endfor %}
+  {% if not view.tables %}<span class="muted" style="padding:8px 0">No tables yet.</span>{% endif %}
+</div>
+{% if view.table %}
+<div class="panel">
+  <div class="muted" style="margin-bottom:8px">{{ view.count|num }} {{ 'row' if view.count == 1 else 'rows' }} in <code>{{ view.table }}</code>{% if view.count > 100 %} (showing the first 100){% endif %}</div>
+  {% if view.rows %}
+  {% set cols = view.rows[0].keys()|list %}
+  <table><thead><tr>{% for c in cols %}<th>{{ c }}</th>{% endfor %}</tr></thead><tbody>
+  {% for r in view.rows %}<tr>{% for c in cols %}{% set v = r[c] %}<td class="cell" title="{{ v if v is string else v|tojson }}">{% if v is none %}<span class="muted">null</span>{% else %}{{ (v if v is string else v|tojson)|truncate(160) }}{% endif %}</td>{% endfor %}</tr>{% endfor %}
+  </tbody></table>
+  {% else %}<div class="empty">This table is empty.</div>{% endif %}
+</div>
+{% endif %}
+
+<h2>Run SQL</h2>
+<div class="panel">
+  <form method="post" action="{{ root }}/storage/sql">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="ref" value="{{ ref }}">
+    <textarea name="query" style="min-height:70px" placeholder="select * from _kv limit 20">{{ sql_query or ('select * from ' ~ (view.table or '_kv') ~ ' limit 20') }}</textarea>
+    <div class="row" style="margin-top:8px;justify-content:space-between;align-items:center">
+      <span class="muted" style="font-size:12px">One statement. {% if not can_write %}This object is read-only for you.{% endif %}</span>
+      <button class="primary">Run</button>
+    </div>
+  </form>
+  {% if sql_error %}<div class="flash err" style="margin:12px 0 0">{{ sql_error }}</div>{% endif %}
+  {% if sql_rows is not none %}
+    {% if sql_rows %}{% set cols = sql_rows[0].keys()|list %}
+    <table style="margin-top:12px"><thead><tr>{% for c in cols %}<th>{{ c }}</th>{% endfor %}</tr></thead><tbody>
+    {% for r in sql_rows %}<tr>{% for c in cols %}{% set v = r[c] %}<td class="cell">{% if v is none %}<span class="muted">null</span>{% else %}{{ (v if v is string else v|tojson)|truncate(160) }}{% endif %}</td>{% endfor %}</tr>{% endfor %}
+    </tbody></table>
+    {% else %}<div class="muted" style="margin-top:12px">Done. No rows returned.</div>{% endif %}
+  {% endif %}
+</div>
+
+{% if can_write %}
+<h2>Save a value</h2>
+<div class="panel">
+  <form method="post" action="{{ root }}/storage/put" class="row">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="ref" value="{{ ref }}">
+    <label>Key<input name="key" required size="14"></label>
+    <label style="flex:1;min-width:160px">Value (JSON or text)<input name="value" style="width:100%"></label>
+    <button class="primary">Save</button>
+  </form>
+</div>
+{% endif %}
+
+{% else %}
+<div class="grid2" style="grid-template-columns:minmax(0,1fr)">
+<div class="panel">
+  {% if view.files %}
+  <table><thead><tr><th>File</th><th class="num">Size</th><th>Updated</th></tr></thead><tbody>
+  {% for f in view.files %}<tr><td><a href="{{ base_url }}&file={{ f.path|urlencode }}">{{ f.path }}</a></td>
+    <td class="num">{{ f.size|bytes }}</td><td>{{ f.updated|when if f.updated else '–' }}</td></tr>{% endfor %}
+  </tbody></table>
+  {% else %}<div class="empty">No files yet.</div>{% endif %}
+</div>
+</div>
+{% if view.file %}
+<h2>{{ view.file.path }} <span class="muted" style="font-weight:400">· {{ view.file.size|bytes }}</span></h2>
+{% if view.file.text is not none %}<pre>{{ view.file.text }}</pre>{% else %}<div class="panel"><div class="empty">Binary file, not shown.</div></div>{% endif %}
+{% endif %}
+{% if can_write %}
+<h2>Save a file</h2>
+<div class="panel">
+  <form method="post" action="{{ root }}/storage/write">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="ref" value="{{ ref }}">
+    <div class="row"><label>Path<input name="path" value="{{ view.file.path if view.file else 'notes/new.txt' }}" required size="28"></label>
+      <button class="primary">Save</button></div>
+    <textarea name="content" style="margin-top:10px" placeholder="File content">{{ view.file.text if view.file and view.file.text is not none else '' }}</textarea>
+  </form>
+</div>
+{% endif %}
+{% endif %}
+
+{% if mode == 'owner' %}
+<h2>Who can use it</h2>
+<div class="panel">
+  <table><tbody>
+    <tr><td><code>you</code></td><td class="muted">owner, always</td><td></td></tr>
+    {% for x in info.shared_with %}
+    <tr><td><code>{{ x.who }}</code></td><td class="muted">{{ x.mode }}</td>
+      <td><form class="inline" method="post" action="{{ root }}/storage/unshare">
+        <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="ref" value="{{ ref }}"><input type="hidden" name="who" value="{{ x.who }}">
+        <button class="danger">Remove</button></form></td></tr>
+    {% endfor %}
+  </tbody></table>
+  <form class="row" method="post" action="{{ root }}/storage/share" style="margin-top:10px">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="ref" value="{{ ref }}">
+    <label>Person or app<input name="who" placeholder="alice  or  app:chatbot" required size="24"></label>
+    <label>Access<select name="mode"><option>read</option><option>write</option></select></label>
+    <button class="primary">Share</button>
+  </form>
+</div>
+
+<h2>Delete</h2>
+<div class="panel">
+  <form class="row" method="post" action="{{ root }}/storage/drop"
+        onsubmit="return confirm('Delete {{ ref }} with everything in it? This cannot be undone.')">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="ref" value="{{ ref }}">
+    <label>Type <code>{{ ref }}</code> to confirm<input name="confirm" size="24" autocomplete="off"></label>
+    <button class="danger">Delete object</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

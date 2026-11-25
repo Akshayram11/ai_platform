@@ -11,21 +11,40 @@ Local:  OPENAI_API_KEY=... uvicorn app:app --port 8080
 
 from __future__ import annotations
 
+import logging
 import os
+import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from mcp_tools import Toolbox
 from openai import OpenAI
 from pydantic import BaseModel
 
+try:
+    from dapp_objects import (  # installed in the dapp runtime; copied in by our Dockerfile
+        ObjectsError,
+        objects,
+    )
+except ImportError:  # local run without the helper: the chat works, it just isn't saved
+    objects = None
+    ObjectsError = RuntimeError
+
+log = logging.getLogger("chatbot")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+# Models the user may switch to in the page (the first is MODEL). Others, e.g. "small" (served inside DataOS by the
+# gateway), get a plain chat: no reasoning setting and no tools, which small models don't handle well.
+MODELS = [MODEL, *[m.strip() for m in os.environ.get("OPENAI_MODELS", "").split(",") if m.strip() and m.strip() != MODEL]]
 SYSTEM = os.environ.get("SYSTEM_PROMPT", "You are a helpful, concise assistant running on DataOS.")
 REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "")  # reasoning models only: none|low|medium|high
 MAX_TURNS = 20
 MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "12"))
 TOOLS = Toolbox.from_env()
+# Chat history lives in immortal-obj (`objects: true` in dapp.yaml): one object "chat" per signed-in person, kept by
+# the app, shared back to that person (read-only) so they can open it in the dashboard's Storage page.
+HISTORY = bool(objects and os.environ.get("DAPP_OBJECTS_URL"))
+_ready: set[str] = set()
 
 app = FastAPI(title="dapp chatbot", root_path=os.environ.get("ROOT_PATH", ""))
 _client: OpenAI | None = None
@@ -39,6 +58,8 @@ class Msg(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[Msg]
+    model: str | None = None
+    chat_id: str | None = None      # the saved conversation this belongs to; none = start a new one
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -46,10 +67,92 @@ def index() -> str:
     return PAGE.replace("{{MODEL}}", MODEL)
 
 
+@app.get("/api/models")
+def models() -> dict:
+    return {"default": MODEL, "models": MODELS}
+
+
+def who(request: Request) -> str:
+    return request.headers.get("x-dapp-user", "")
+
+
+def history(user: str):
+    """This person's chat object, created on first use. Tables: chats (id, title, updated), msgs (chat_id, role, ...)."""
+    db = objects.open("chat", for_user=user or None)
+    if user not in _ready:
+        db.sql("create table if not exists chats (id text primary key, title text, "
+               "created text default current_timestamp, updated text default current_timestamp)")
+        db.sql("create table if not exists msgs (id integer primary key autoincrement, chat_id text, role text, "
+               "content text, model text, at text default current_timestamp)")
+        if user:
+            try:
+                db.share(user)           # theirs to read in the dashboard (Storage); only the app can write it
+            except ObjectsError as e:
+                log.info("not shared back to %s: %s", user, e)
+        _ready.add(user)
+    return db
+
+
+def start_turn(user: str, chat_id: str | None, text: str) -> str | None:
+    """Save the question; returns the conversation id, or None when saving isn't possible (the chat still works)."""
+    try:
+        db = history(user)
+        if chat_id and not db.sql("select 1 as x from chats where id = ?", [chat_id]):
+            chat_id = None
+        if not chat_id:
+            chat_id = uuid.uuid4().hex[:12]
+            db.sql("insert into chats (id, title) values (?, ?)", [chat_id, " ".join(text.split())[:60] or "New chat"])
+        db.sql("insert into msgs (chat_id, role, content) values (?, 'user', ?)", [chat_id, text])
+        return chat_id
+    except (ObjectsError, OSError) as e:
+        log.warning("chat history not saved: %s", e)
+        return None
+
+
+def finish_turn(user: str, chat_id: str, model: str, reply: str) -> None:
+    if not reply.strip() or reply.lstrip().startswith("[error"):
+        return
+    try:
+        db = history(user)
+        db.sql("insert into msgs (chat_id, role, content, model) values (?, 'assistant', ?, ?)", [chat_id, reply, model])
+        db.sql("update chats set updated = current_timestamp where id = ?", [chat_id])
+    except (ObjectsError, OSError) as e:
+        log.warning("reply not saved: %s", e)
+
+
+@app.get("/api/history")
+def list_history(request: Request) -> dict:
+    if not HISTORY:
+        return {"enabled": False, "chats": []}
+    try:
+        rows = history(who(request)).sql("select id, title, updated from chats order by updated desc, rowid desc limit 50")
+    except (ObjectsError, OSError) as e:
+        return {"enabled": False, "chats": [], "error": str(e)}
+    return {"enabled": True, "chats": rows}
+
+
+@app.get("/api/history/{chat_id}")
+def get_history(chat_id: str, request: Request) -> dict:
+    if not HISTORY:
+        raise HTTPException(404, "chat history is off: add `objects: true` to dapp.yaml")
+    rows = history(who(request)).sql("select role, content, model from msgs where chat_id = ? order by id", [chat_id])
+    return {"id": chat_id, "messages": rows}
+
+
+@app.delete("/api/history/{chat_id}")
+def delete_history(chat_id: str, request: Request) -> dict:
+    if not HISTORY:
+        raise HTTPException(404, "chat history is off: add `objects: true` to dapp.yaml")
+    db = history(who(request))
+    db.sql("delete from msgs where chat_id = ?", [chat_id])
+    db.sql("delete from chats where id = ?", [chat_id])
+    return {"deleted": chat_id}
+
+
 @app.get("/healthz")
 def healthz() -> dict:
-    return {"ok": True, "model": MODEL, "via_gateway": "dapp" in os.environ.get("OPENAI_BASE_URL", ""),
-            "tools": list(TOOLS.servers) if TOOLS else []}
+    return {"ok": True, "model": MODEL, "models": MODELS, "via_gateway": "dapp" in os.environ.get("OPENAI_BASE_URL", ""),
+            "tools": list(TOOLS.servers) if TOOLS else [], "history": HISTORY}
 
 
 def gateway_user_headers(request: Request) -> dict[str, str]:
@@ -61,32 +164,51 @@ def gateway_user_headers(request: Request) -> dict[str, str]:
 
 @app.post("/api/chat")
 def chat(req: ChatRequest, request: Request) -> StreamingResponse:
+    model = req.model or MODEL
+    if model not in MODELS:
+        raise HTTPException(400, f"model must be one of {', '.join(MODELS)}")
+    main = model == MODEL
     user_headers = gateway_user_headers(request)
-    history = [m.model_dump() for m in req.messages if m.role in ("user", "assistant")][-MAX_TURNS:]
+    turns = [m.model_dump() for m in req.messages if m.role in ("user", "assistant")][-MAX_TURNS:]
+    user = who(request)
+    chat_id = None
+    if HISTORY and req.messages and req.messages[-1].role == "user":
+        chat_id = start_turn(user, req.chat_id, req.messages[-1].content)
 
     def stream():
+        parts: list[str] = []
+        try:
+            for piece in produce():
+                parts.append(piece)
+                yield piece
+        finally:                        # also when the browser went away mid-answer: keep what was said
+            if chat_id:
+                finish_turn(user, chat_id, model, "".join(parts))
+
+    def produce():
         global _client
         try:
             # DAPP_LLM_KEY (gateway key) when deployed with llm: true; otherwise OPENAI_API_KEY from the environment
             _client = _client or OpenAI(api_key=os.environ.get("DAPP_LLM_KEY") or None)
-            extra = {"extra_body": {"reasoning_effort": REASONING_EFFORT}} if REASONING_EFFORT else {}  # any SDK version
+            extra = {"extra_body": {"reasoning_effort": REASONING_EFFORT}} if REASONING_EFFORT and main else {}
             if user_headers:
                 extra["extra_headers"] = user_headers
-            if TOOLS:
-                yield from with_tools(_client, history, extra, request.headers.get("x-dapp-user", ""))
+            if TOOLS and main:
+                yield from with_tools(_client, turns, extra, user)
                 return
             for chunk in _client.chat.completions.create(
-                model=MODEL, messages=[{"role": "system", "content": SYSTEM}, *history], stream=True, **extra
+                model=model, messages=[{"role": "system", "content": SYSTEM}, *turns], stream=True, **extra
             ):
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
         except Exception as e:  # show the reason in the chat instead of a dead stream
             yield f"\n\n[error: {type(e).__name__}: {e}]"
 
-    return StreamingResponse(stream(), media_type="text/plain; charset=utf-8")
+    return StreamingResponse(stream(), media_type="text/plain; charset=utf-8",
+                             headers={"X-Chat-Id": chat_id} if chat_id else {})
 
 
-def with_tools(client: OpenAI, history: list[dict], extra: dict, user: str):
+def with_tools(client: OpenAI, turns: list[dict], extra: dict, user: str):
     """The model asks for tools, we run them through the gateway, until it answers. Progress lines are streamed
     so a slow data query doesn't look like a hang."""
     specs = TOOLS.openai_tools(user)
@@ -95,7 +217,7 @@ def with_tools(client: OpenAI, history: list[dict], extra: dict, user: str):
     system = SYSTEM
     if TOOLS.instructions():
         system += "\n\nYou can use these tools. Their own guidance:\n" + TOOLS.instructions()
-    messages: list[dict] = [{"role": "system", "content": system}, *history]
+    messages: list[dict] = [{"role": "system", "content": system}, *turns]
     if specs and "extra_body" in extra:  # chat completions refuses function tools with reasoning on (gpt-6-luna)
         extra = {**extra, "extra_body": {**extra["extra_body"], "reasoning_effort": "none"}}
     for _ in range(MAX_TOOL_ROUNDS):

@@ -14,16 +14,18 @@ Admin API (callers authenticate with their DataOS token/API key, verified by Hei
     POST   /admin/keys                 {app, tenant, rotate}  -> {key}   issue an app key
     DELETE /admin/keys/{tenant}/{app}                                    revoke an app's keys
     GET    /admin/keys                                                   your app keys (no secrets)
-    GET    /admin/usage?app=&since_hours=&group_by=app,model,day,end_user   token usage (+ cost if priced)
+    GET    /admin/usage?app=&model=&since_hours=&group_by=app,model,day,end_user   token usage (+ cost if priced)
 """
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -53,6 +55,24 @@ PROVIDERS = {
         "auth": lambda key: {"authorization": f"Bearer {key}"},
     },
 }
+
+
+def local_models() -> dict[str, dict]:
+    """Models served inside DataOS (e.g. llama.cpp), reached with the OpenAI API under their own name:
+    DAPP_LOCAL_MODELS='{"small": {"url": "http://llm-small:8080", "key_env": "LLM_SMALL_KEY"}}'.
+    An app asks for model "small" at /openai/v1/chat/completions and the gateway sends it there instead of OpenAI;
+    metering, keys and budgets work the same, and the prompt never leaves DataOS."""
+    raw = os.environ.get("DAPP_LOCAL_MODELS", "").strip()
+    if not raw:
+        return {}
+    try:
+        conf = json.loads(raw)
+        return {str(k): v for k, v in conf.items() if isinstance(v, dict) and v.get("url")}
+    except (ValueError, AttributeError):
+        log.error("DAPP_LOCAL_MODELS is not valid JSON; local models are off")
+        return {}
+
+
 # Never forward the caller's credentials or hop-by-hop headers upstream.
 DROP_REQ = {"x-dapp-user", "host", "authorization", "x-api-key", "apikey", "content-length", "connection", "accept-encoding",
             "cookie", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip"}
@@ -69,6 +89,14 @@ class KeyRequest(BaseModel):
     app: str
     tenant: str
     rotate: bool = False
+
+
+class PersonalKeyRequest(BaseModel):
+    tenant: str
+    rotate: bool = False  # true: the new key replaces (revokes) your earlier personal keys
+
+
+PERSONAL = "user:"  # app name of a personal key; ':' can't appear in a DataOS app name, so the two never clash
 
 
 def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
@@ -112,6 +140,10 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
         return [*owners, res.get("owner")] if res.get("owner") else owners
 
     def require_owner(request: Request, ident: Identity, tenant: str, app: str) -> None:
+        if app.startswith(PERSONAL):  # a person's own key ("user:<id>", never a DataOS app name): only theirs
+            if app != PERSONAL + ident.user_id and ident.user_id not in admins:
+                raise HTTPException(403, f"{app} is someone else's personal key")
+            return
         if ident.user_id in admins:
             return
         owners = app_owners(request, tenant, app)
@@ -138,13 +170,20 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
                 "anthropic": f"{base}/anthropic/v1/...  (apps use this via ANTHROPIC_BASE_URL)",
                 "usage": f"{base}/admin/usage  (DataOS sign-in token or API key)",
                 "keys": f"{base}/admin/keys  (DataOS sign-in token or API key)",
+                "personal key": f"{base}/admin/keys/personal  (your own key for laptop use: dapp llm-key personal)",
                 "tools": f"{base}/mcp/<tenant>/<tool>  (MCP tools: DataOS token/API key or a dapp app key)",
             },
+            # models served inside DataOS: ask the openai endpoint for them by name
+            "local_models": {m: f"served by DataOS app {urlsplit(c['url']).hostname}; "
+                                f"model \"{m}\" on {base}/openai/v1/chat/completions"
+                             for m, c in sorted(local_models().items())},
             "dashboard": f"{base.rsplit('/', 1)[0]}/dapp/",
         }
         if "text/html" in request.headers.get("accept", ""):
             rows = "".join(f"<tr><td><code>{k}</code></td><td>{v}</td></tr>" for k, v in info["endpoints"].items())
             prov = ", ".join(f"{k}: {'configured' if v else 'not configured'}" for k, v in providers.items())
+            rows += "".join(f"<tr><td><code>model {html.escape(m)}</code></td><td>{html.escape(v)}</td></tr>"
+                            for m, v in info["local_models"].items())
             return HTMLResponse(
                 "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
                 "<title>dapp LLM gateway</title><style>body{font:15px system-ui;max-width:760px;margin:40px auto;padding:0 16px;"
@@ -156,7 +195,10 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
 
     @api.get("/healthz")
     def healthz() -> dict[str, Any]:
-        return {"ok": True, "providers": {p: bool(os.environ.get(c["key_env"])) for p, c in PROVIDERS.items()}}
+        return {"ok": True, "providers": {p: bool(os.environ.get(c["key_env"])) for p, c in PROVIDERS.items()},
+                "local_models": sorted(local_models()),
+                # which DataOS app serves each local model (the host in its url), so the dashboard can show its use
+                "local_model_apps": {m: urlsplit(c["url"]).hostname for m, c in sorted(local_models().items())}}
 
     @api.post("/admin/keys")
     def issue_key(body: KeyRequest, request: Request, ident: Identity = Depends(caller)) -> dict[str, Any]:
@@ -164,6 +206,15 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
         key = store.issue_key(tenant=body.tenant, app=body.app, owner=ident.user_id, rotate=body.rotate)
         log.info("issued key for %s/%s to %s (rotate=%s)", body.tenant, body.app, ident.user_id, body.rotate)
         return {"app": body.app, "tenant": body.tenant, "key": key, "prefix": key[:12]}
+
+    @api.post("/admin/keys/personal")
+    def issue_personal_key(body: PersonalKeyRequest, ident: Identity = Depends(caller)) -> dict[str, Any]:
+        """Your own key, to call the LLMs from a laptop or notebook. Usage counts as app user:<you>.
+        It is for LLM calls only: MCP tools refuse it (use your DataOS key there)."""
+        app = PERSONAL + ident.user_id
+        key = store.issue_key(tenant=body.tenant, app=app, owner=ident.user_id, rotate=body.rotate)
+        log.info("issued personal key for %s/%s (rotate=%s)", body.tenant, app, body.rotate)
+        return {"app": app, "tenant": body.tenant, "key": key, "prefix": key[:12]}
 
     @api.delete("/admin/keys/{tenant}/{app}")
     def revoke(tenant: str, app: str, request: Request, ident: Identity = Depends(caller)) -> dict[str, Any]:
@@ -185,13 +236,13 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
         return store.list_keys(None if ident.user_id in admins else ident.user_id)
 
     @api.get("/admin/usage")
-    def usage(app: str | None = None, tenant: str | None = None, since_hours: int = 720,
+    def usage(app: str | None = None, tenant: str | None = None, model: str | None = None, since_hours: int = 720,
               group_by: str = "app,model", all_users: bool = False,
               ident: Identity = Depends(caller)) -> dict[str, Any]:
         owner = None if (all_users and ident.user_id in admins) else ident.user_id
         wanted = [g for g in (x.strip() for x in group_by.split(",")) if g in GROUPABLE] or ["app"]
         # A price belongs to a model, so always fetch per model, price each row, then roll up to the grouping asked for.
-        fine = store.summary(owner=owner, app=app, tenant=tenant, since_hours=since_hours,
+        fine = store.summary(owner=owner, app=app, tenant=tenant, model=model, since_hours=since_hours,
                              group_by=wanted if "model" in wanted else [*wanted, "model"])
         tokens = ("requests", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "errors")
         merged: dict[tuple, dict[str, Any]] = {}
@@ -228,10 +279,6 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
         return k
 
     async def proxy(provider: str, path: str, request: Request, key: AppKey) -> Response:
-        conf = PROVIDERS[provider]
-        real_key = os.environ.get(conf["key_env"])
-        if not real_key:
-            raise HTTPException(503, f"{provider} is not configured on the gateway ({conf['key_env']})")
         body = await request.body()
         req_json: dict | None = None
         if body and "json" in request.headers.get("content-type", ""):
@@ -239,13 +286,28 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
                 req_json = json.loads(body)
             except ValueError:
                 req_json = None
+        model = req_json.get("model") if isinstance(req_json, dict) else None
+        local = local_models().get(model) if provider == "openai" and isinstance(model, str) else None
+        if local:
+            provider = "local"
+            conf = {"upstream": lambda: local["url"], "key_env": local.get("key_env", ""),
+                    "auth": lambda k: {"authorization": f"Bearer {k}"}}
+            real_key = os.environ.get(conf["key_env"], "") if conf["key_env"] else ""
+            if conf["key_env"] and not real_key:
+                raise HTTPException(503, f"local model {model} is not configured on the gateway ({conf['key_env']})")
+        else:
+            conf = PROVIDERS[provider]
+            real_key = os.environ.get(conf["key_env"])
+            if not real_key:
+                raise HTTPException(503, f"{provider} is not configured on the gateway ({conf['key_env']})")
         streaming = bool(req_json and req_json.get("stream"))
-        if provider == "openai" and streaming and path.endswith("chat/completions") and req_json is not None:
+        if provider in ("openai", "local") and streaming and path.endswith("chat/completions") and req_json is not None:
             req_json.setdefault("stream_options", {})["include_usage"] = True  # otherwise no usage in stream
             body = json.dumps(req_json).encode()
 
         headers = {k: v for k, v in request.headers.items() if k.lower() not in DROP_REQ}
-        headers.update(conf["auth"](real_key))
+        if real_key:
+            headers.update(conf["auth"](real_key))
         url = f"{conf['upstream']().rstrip('/')}/{path}"
         meter = Meter(model=(req_json or {}).get("model", "") if isinstance(req_json, dict) else "")
         started = time.monotonic()

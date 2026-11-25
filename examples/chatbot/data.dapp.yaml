@@ -6,7 +6,7 @@
 name: data-chatbot
 title: DataOS Data Chatbot
 description: Ask about DataOS data products; uses the Data Product MCP via the dapp gateway
-image: docker.io/tmdcio/dapp-chatbot:0.1.9
+image: docker.io/tmdcio/dapp-chatbot:0.1.12
 port: 8080
 command: [sh, -c, "uvicorn app:app --host 0.0.0.0 --port 8080 --proxy-headers"]
 compute: engineering-compute

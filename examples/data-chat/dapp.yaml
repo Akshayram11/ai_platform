@@ -1,0 +1,22 @@
+# Data Chat: ask questions about DataOS data products in plain words. The small model that runs inside DataOS (`small`,
+# Qwen2.5-0.5B) explains the answer; the app itself finds the data through the Data Product MCP, so the model never needs
+# tool calling. From source, no Docker:
+#   dapp deploy -f examples/data-chat/dapp.yaml
+# Needs: the gateway tool `dataproduct-mcp` (dapp tool ls) and the model `small` (apps/llm-small).
+name: data-chat
+title: Data Chat
+description: Ask about DataOS data products; the in-DataOS model explains the numbers
+runtime: python-3.12
+code: ./app
+run: uvicorn app:app --host 0.0.0.0 --port $PORT --proxy-headers
+compute: engineering-compute
+path: /data-chat
+llm: true                       # DAPP_LLM_KEY + OPENAI_BASE_URL: the gateway meters the model calls
+objects: true                   # chat history in immortal-obj, one object per signed-in person
+tools: [dataproduct-mcp]        # the app may call this MCP tool through the gateway
+metrics: true
+resources: {cpu: 100m, memory: 256Mi, cpuLimit: "1", memoryLimit: 768Mi}
+env:
+  ROOT_PATH: /data-chat
+  DATA_MODEL: small
+# private by default: DataOS sign-in in front; only the owner until people are added (dapp access allow data-chat USER)

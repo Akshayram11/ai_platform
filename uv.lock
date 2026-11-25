@@ -255,6 +255,7 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "jinja2" },
     { name = "mcp" },
@@ -269,6 +270,7 @@ dashboard = [
     { name = "uvicorn", extra = ["standard"] },
 ]
 gateway = [
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "sqlalchemy" },
     { name = "uvicorn", extra = ["standard"] },
@@ -286,6 +288,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", marker = "extra == 'gateway'", specifier = ">=42" },
     { name = "dataos-apps", extras = ["mcp", "gateway", "dashboard"], marker = "extra == 'all'" },
     { name = "fastapi", marker = "extra == 'dashboard'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'gateway'", specifier = ">=0.115" },

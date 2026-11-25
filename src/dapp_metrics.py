@@ -9,6 +9,8 @@ ingress and the sign-in layer never see:
     dapp_metrics.start()                 # serves /metrics on $DAPP_METRICS_PORT (default 9102)
     app = dapp_metrics.instrument(app)   # optional: request counts for an ASGI app
 
+Or next to a server that isn't Python (llm-small runs it beside llama.cpp): `python3 dapp_metrics.py &`.
+
 dapp sets `metricEndpoint: {port: 9102, path: /metrics}` for apps with `metrics: true`.
 
 Series (all prefixed dapp_ so they never clash with an app's own metrics):
@@ -190,3 +192,8 @@ def instrument(app):
             _count(status["code"], time.perf_counter() - started)
 
     return middleware
+
+
+if __name__ == "__main__":  # standalone, next to a server that isn't Python: python3 dapp_metrics.py &
+    start()
+    threading.Event().wait()

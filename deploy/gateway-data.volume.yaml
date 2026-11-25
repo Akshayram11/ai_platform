@@ -1,0 +1,12 @@
+# The gateway's SQLite (app keys, tools, usage) on a DataOS Volume: unlike the old inline disk, a Volume survives
+# updates, deletes and redeploys of the gateway app (tested on poliks 2026-11-24).
+name: dapp-gateway-data
+version: v2alpha
+type: volume
+description: dapp gateway data (app keys, MCP tools, usage)
+tags:
+  - dapp
+volume:
+  size: 2Gi
+  type: disk
+  dataplane: poldp01

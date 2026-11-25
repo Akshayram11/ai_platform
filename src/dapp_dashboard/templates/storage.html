@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Storage · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% macro objlink(ref, label=None) -%}<a href="{{ root }}/storage/object?ref={{ ref|urlencode }}">{{ label or ref }}</a>{%- endmacro %}
+{% block body %}
+<h1>Storage</h1>
+<p class="sub">immortal-obj: objects that survive restarts and redeploys. Every person and every app has their own; nothing is
+shared unless its owner shares it, and each call goes through the gateway as you.</p>
+
+{% if storage_error %}<div class="flash err">immortal-obj isn't reachable: {{ storage_error }}</div>{% endif %}
+
+{% set own = listing.own %}{% set shared = listing.shared_with_you %}
+<div class="kpis">
+  <div class="kpi"><div class="label">Your objects</div><div class="value">{{ own|length }}</div></div>
+  <div class="kpi"><div class="label">Databases</div><div class="value">{{ own|selectattr('kind','equalto','db')|list|length }}</div></div>
+  <div class="kpi"><div class="label">File volumes</div><div class="value">{{ own|selectattr('kind','equalto','volume')|list|length }}</div></div>
+  <div class="kpi"><div class="label">Shared with you</div><div class="value">{{ shared|length }}</div></div>
+</div>
+
+<h2>Your objects{% if listing.you %} <span class="muted" style="font-weight:400">· {{ listing.you }}</span>{% endif %}</h2>
+<div class="panel">
+{% if own %}
+<table><thead><tr><th>Name</th><th>Kind</th><th>Updated</th><th>Shared with</th></tr></thead><tbody>
+{% for o in own %}
+<tr><td>{{ objlink(o.name) }}</td><td><span class="kind">{{ o.kind }}</span></td><td>{{ o.updated|when }}</td>
+<td>{% for x in o.shared_with %}<span class="pill">{{ x.who }} · {{ x.mode }}</span> {% else %}<span class="muted">only you</span>{% endfor %}</td></tr>
+{% endfor %}
+</tbody></table>
+{% else %}<div class="empty">Nothing saved yet. Save a value below, or from a terminal: <code>objects.open("notes").put("a", 1)</code>.</div>{% endif %}
+</div>
+
+<h2>Shared with you</h2>
+<div class="panel">
+{% if shared %}
+<table><thead><tr><th>Object</th><th>Access</th></tr></thead><tbody>
+{% for o in shared %}<tr><td>{{ objlink(o.object) }}</td><td><span class="pill {{ 'warn' if o.mode == 'write' else '' }}">{{ o.mode }}</span></td></tr>{% endfor %}
+</tbody></table>
+<p class="muted" style="margin:10px 0 0;font-size:12px">Your chat history from the chatbot shows up here too: the app keeps it and shares it back with you (read-only).</p>
+{% else %}<div class="empty">Nobody has shared an object with you yet.</div>{% endif %}
+</div>
+
+<h2>Try it</h2>
+<div class="grid2">
+  <div class="panel">
+    <h3 style="margin:0 0 4px">Save a value</h3>
+    <p class="muted" style="margin:0 0 10px">Into a database object (created on first save). Values are JSON, or plain text.</p>
+    <form method="post" action="{{ root }}/storage/put" class="row">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}">
+      <label>Object<input name="ref" value="scratch" required pattern="[A-Za-z0-9._/-]+" size="14"></label>
+      <label>Key<input name="key" value="hello" required size="12"></label>
+      <label style="flex:1;min-width:140px">Value<input name="value" value='{"from": "dashboard"}' style="width:100%"></label>
+      <button class="primary">Save</button>
+    </form>
+  </div>
+  <div class="panel">
+    <h3 style="margin:0 0 4px">Save a file</h3>
+    <p class="muted" style="margin:0 0 10px">Into a volume object: a folder of files (created on first save).</p>
+    <form method="post" action="{{ root }}/storage/write">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}">
+      <div class="row">
+        <label>Object<input name="ref" value="my-files" required pattern="[A-Za-z0-9._/-]+" size="14"></label>
+        <label>Path<input name="path" value="notes/hello.txt" required size="18"></label>
+        <button class="primary">Save</button>
+      </div>
+      <textarea name="content" style="margin-top:10px;min-height:60px" placeholder="File content">Hello from the dashboard</textarea>
+    </form>
+  </div>
+</div>
+{% endblock %}

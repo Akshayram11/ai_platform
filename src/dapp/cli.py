@@ -200,7 +200,7 @@ public: false               # true = skip DataOS login in front of the app
 """
 
 
-CHATBOT_IMAGE = "docker.io/tmdcio/dapp-chatbot:0.1.9"   # public image built from examples/chatbot
+CHATBOT_IMAGE = "docker.io/tmdcio/dapp-chatbot:0.1.12"   # public image built from examples/chatbot
 CHATBOT_TEMPLATE = """\
 # A ready LLM chatbot: private (DataOS sign-in), calls go through the dapp gateway so tokens and cost are counted
 # per person. Nothing to build. Deploy with:  dapp deploy
@@ -222,6 +222,27 @@ env:
 """
 
 
+CLAUDE_CODE_IMAGE = "docker.io/tmdcio/dapp-claude-code:0.1.4"   # built from apps/claude-code
+CLAUDE_CODE_TEMPLATE = """\
+# Your own Claude Code on DataOS: a browser terminal to build and deploy apps by asking. Only you (the owner) can
+# open it, and it deploys as you. Sign in with your Claude account inside the terminal. Deploy with:  dapp deploy
+name: {name}
+title: Claude Code ({name})
+description: Claude Code in a browser terminal; builds and deploys DataOS apps with dapp
+image: {image}
+command: [/opt/claude/start.sh]
+port: 8080
+compute: {compute}
+path: /{name}
+metrics: true
+resources: {{cpu: 250m, memory: 1Gi, cpuLimit: "2", memoryLimit: 2Gi}}
+env:
+  ROOT_PATH: /{name}          # must equal path
+  DATAOS_FQDN: {fqdn}
+  DAPP_DEFAULT_COMPUTE: {compute}
+"""
+
+
 def compute_or_default(compute: str) -> str:
     """`--compute` wins; otherwise DAPP_DEFAULT_COMPUTE, otherwise this deployment's compute."""
     return compute if compute != "runnable-default" else os.environ.get("DAPP_DEFAULT_COMPUTE", "engineering-compute")
@@ -236,7 +257,7 @@ def init(
     description: str = typer.Option("My DataOS app"),
     file: Path = typer.Option(Path("dapp.yaml"), "--file", "-f"),
     force: bool = typer.Option(False, help="Overwrite an existing file"),
-    template: str = typer.Option("blank", "--template", help="blank | chatbot (a ready OpenAI chatbot, no build needed)"),
+    template: str = typer.Option("blank", "--template", help="blank | chatbot (a ready OpenAI chatbot) | claude-code (your own Claude Code terminal)"),
 ) -> None:
     """Write a starter dapp.yaml. `--template chatbot` gives a working LLM chatbot you can deploy as is."""
     def go():
@@ -244,10 +265,17 @@ def init(
             raise PlatformError(f"{file} exists (use --force)")
         if template == "chatbot":
             text = CHATBOT_TEMPLATE.format(name=name, image=CHATBOT_IMAGE, compute=compute_or_default(compute))
+        elif template == "claude-code":
+            try:  # the instance you're logged in to; the default one if there's no login yet
+                fqdn = load_context(state.context, state.tenant).fqdn
+            except ConfigError:
+                from .config import DEFAULT_FQDN as fqdn
+            text = CLAUDE_CODE_TEMPLATE.format(name=name, image=CLAUDE_CODE_IMAGE, compute=compute_or_default(compute),
+                                               fqdn=fqdn)
         elif template == "blank":
             text = TEMPLATE.format(name=name, image=image, port=port, compute=compute, description=description)
         else:
-            raise PlatformError(f"unknown template '{template}' (blank or chatbot)")
+            raise PlatformError(f"unknown template '{template}' (blank, chatbot or claude-code)")
         AppSpec.model_validate(__import__("yaml").safe_load(text))  # template must stay valid
         file.write_text(text)
         _out({"written": str(file)} if state.json else f"wrote {file}")
@@ -523,6 +551,30 @@ def llm_key_rotate(
                 console.print(f"[yellow]app didn't restart within {timeout}s; old keys still active: "
                               f"{', '.join(r['still_active'])}. Revoke them with `dapp llm-key revoke`.[/yellow]")
         _out(r, show)
+    _run(go)
+
+
+@llm_key_app.command("personal")
+def llm_key_personal(
+    save: Path = typer.Option(None, "--save", help="Write OPENAI_API_KEY and OPENAI_BASE_URL to this file (mode 600) "
+                                                   "instead of printing the key"),
+    rotate: bool = typer.Option(False, "--rotate", help="Revoke your earlier personal keys"),
+) -> None:
+    """Your own LLM key, to call the gateway's models (e.g. "small") from your laptop. Counted as app user:<you>."""
+    def go():
+        r = _platform().personal_llm_key(rotate=rotate)
+        if save:
+            target = save.expanduser()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.touch(mode=0o600, exist_ok=True)
+            target.chmod(0o600)
+            target.write_text(f"OPENAI_API_KEY={r['key']}\nOPENAI_BASE_URL={r['base_url']}\n")
+            _out({"app": r["app"], "prefix": r["prefix"], "saved": str(target), "base_url": r["base_url"]},
+                 lambda x: console.print(f"key {x['prefix']}… saved to {x['saved']}\n"
+                                         f"use it: set -a; . {x['saved']}; set +a  (OpenAI SDK, model \"small\")"))
+        else:
+            _out(r, lambda x: console.print(f"OPENAI_API_KEY={x['key']}\nOPENAI_BASE_URL={x['base_url']}\n"
+                                            "[dim]shown once: the gateway keeps only a hash[/dim]"))
     _run(go)
 
 

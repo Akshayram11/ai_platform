@@ -132,6 +132,10 @@ Destructive tools need `confirm=true`. Agents can also run `dapp … --json`. No
 To run it locally first, set the key in your shell and run `uvicorn app:app --port 8080`
 from `examples/chatbot` (`pip install -r requirements.txt`).
 
+The page has a **model switch** (`OPENAI_MODELS: small` adds the model served inside DataOS, see
+[docs/llm-gateway.md](docs/llm-gateway.md)) and a **chat history** sidebar: with `objects: true` each signed-in person's chats are
+kept in their own immortal-obj object, so they survive restarts, and people can open them on the dashboard's Storage page.
+
 ## Building another LLM app (not a chat)
 
 `examples/llm-api` is a JSON API that summarizes documents; `deploy/grants/app-developer.template.yaml` is what a
@@ -140,6 +144,16 @@ developer needs besides logging in (create resources, use the compute, read thei
 `Anthropic(api_key=...)`). dapp sets `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` and `DAPP_LLM_GATEWAY_URL`, and the
 app's `dapp-<app>-llm` secret holds only `DAPP_LLM_KEY`. The gateway holds the real provider keys and meters tokens
 and cost per app.
+
+Models served inside DataOS (`DAPP_LOCAL_MODELS`, e.g. `small` = Qwen2.5-0.5B on `apps/llm-small`) are asked for by
+name on the same OpenAI endpoint. To call them from a laptop, get a personal key (app `user:<you>` in the usage;
+it works for LLM calls only, not MCP tools):
+
+```bash
+dapp llm-key personal --save ~/.dapp/llm.env      # OPENAI_API_KEY + OPENAI_BASE_URL, mode 600; --rotate replaces it
+set -a; . ~/.dapp/llm.env; set +a
+python -c 'from openai import OpenAI; print(OpenAI().chat.completions.create(model="small", messages=[{"role":"user","content":"hi"}]).choices[0].message.content)'
+```
 
 ## MCP tools through the gateway (`dapp tool`)
 
@@ -187,9 +201,38 @@ websockets), so Streamlit or anything else needs no code for it. A code change i
 ## Claude Code on DataOS (`apps/claude-code`)
 
 A browser terminal running Claude Code, with `dapp` inside, to build and deploy apps by asking. Only the app's
-owner can open it (the terminal acts with the owner's DataOS identity, which DataOS gives the pod). The Anthropic
-key lives in the app's secret, see `apps/claude-code/dapp.yaml`. Files in the terminal's workspace don't survive
-a restart; deployed apps keep their own copy.
+owner can open it (the terminal acts with the owner's DataOS identity, which DataOS gives the pod). `~/work` and
+Claude's conversations are saved to your immortal-obj every 30 s and restored on restart. The Claude sign-in is lost
+whenever DataOS replaces the pod, unless you store a token as a secret (`claude setup-token`, see `apps/claude-code/dapp.yaml`
+and [docs/claude-code.md](docs/claude-code.md)).
+
+## More documentation
+[docs/](docs/README.md): architecture, the LLM gateway and the in-DataOS model `small`, immortal-obj, running apps from source,
+Claude Code, the dashboard (Storage, access requests) and a runbook with the versions that are live and the gotchas we hit.
+
+## Durable storage: immortal-obj (`apps/immortal-obj`)
+
+Apps and agents lose their files on restart. immortal-obj gives each of them objects that don't: small SQLite
+databases with a key-value table, one owner each, kept on the DataOS Volume `immortal-obj`. Like a Durable Object,
+one object has one writer at a time.
+
+- **Who owns what.** The gateway proves the caller (DataOS sign-in for people, gateway keys for apps) and passes it
+  in `x-dapp-caller`, which clients can't set. A person's objects are `user:<id>/...`, an app's `app:<name>/...`.
+  A bare name is always your own; anything else needs a share from its owner (`share` / `unshare`, read or write).
+- **Apps:** `objects: true` in dapp.yaml (implies `llm: true`), then `from dapp_objects import objects` (in the
+  runtime image). `objects.open("chat", for_user=user)` keeps one object per end user.
+- **Claude Code / people:** the MCP tool `immortal-obj` (`dapp tool connect immortal-obj`): put, get, keys, delete,
+  sql, objects, share, unshare, drop.
+- **Every call** is recorded by the gateway (`dapp tool usage immortal-obj`).
+
+Set up: see the comments in `apps/immortal-obj/dapp.yaml`.
+
+## Persistent data: use a Volume, not `disk:`
+
+An app with an inline `disk:` cannot be updated on Poros (the StatefulSet update fails, the app goes `error(qt)`,
+the old pod keeps serving; only delete + recreate helps, with a new empty disk). An app that mounts a standalone
+**Volume** resource (`volumes: [{id: <volume>, directory: /data}]`) updates in place and keeps its data even across
+`dapp rm` + deploy (tested on poliks). DataOS requires such an app to be stateful and one pod at a time.
 
 ## Secrets as YAML (`deploy/secrets/`)
 

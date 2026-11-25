@@ -1,0 +1,11 @@
+# Model files for llm-small (and later models). A Volume keeps them across restarts and updates of the app.
+name: llm-models
+version: v2alpha
+type: volume
+description: Model files for small LLMs served on DataOS (llm-small)
+tags:
+  - dapp
+volume:
+  size: 5Gi
+  type: disk
+  dataplane: poldp01

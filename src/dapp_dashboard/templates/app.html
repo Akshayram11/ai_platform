@@ -37,6 +37,29 @@
   {% endif %}
 </div>
 
+{% for sv in served or [] %}
+<div class="row" style="justify-content:space-between;align-items:end;margin-top:28px">
+  <h2 style="margin:0">Model <code>{{ sv.model }}</code>: who used it</h2>
+  <span class="muted">last
+    {% for d, label in [(1,'24h'),(7,'7 days'),(30,'30 days'),(90,'90 days')] %}<a href="?days={{ d }}"
+      style="{{ 'font-weight:600;color:var(--ink)' if d == days }}">{{ label }}</a>{{ ' · ' if not loop.last }}{% endfor %}</span>
+</div>
+<div class="panel" style="margin-top:10px">
+{% set u = sv.usage %}
+{% if u and u.error %}<div class="muted">LLM gateway not reachable: {{ u.error }}</div>
+{% elif u and u.rows %}
+<table><thead><tr><th>App</th><th class="num">Requests</th><th class="num">Input tokens</th><th class="num">Output tokens</th><th class="num">Errors</th></tr></thead><tbody>
+{% for r in u.rows|sort(attribute='requests', reverse=True) %}
+<tr><td><a href="{{ root }}/apps/{{ r.app }}?tab=llm">{{ r.app }}</a></td><td class="num">{{ r.requests|num }}</td>
+<td class="num">{{ r.input_tokens|num }}</td><td class="num">{{ r.output_tokens|num }}</td><td class="num">{{ r.errors|num }}</td></tr>
+{% endfor %}
+<tr><td><b>Total</b></td><td class="num"><b>{{ u.total.requests|num }}</b></td><td class="num"><b>{{ u.total.input_tokens|num }}</b></td><td class="num"><b>{{ u.total.output_tokens|num }}</b></td><td></td></tr>
+</tbody></table>
+<p class="muted" style="margin:10px 0 0;font-size:12px">Apps call this model through the dapp gateway as <code>{{ sv.model }}</code>; the tokens count on the calling app. You see the apps you own.</p>
+{% else %}<div class="empty">No app called <code>{{ sv.model }}</code> in this period.</div>{% endif %}
+</div>
+{% endfor %}
+
 <h2>Pods</h2>
 <div class="panel">
 {% set rd = app.runtime_detail or {} %}{% set nodes = rd.nodeDetails or rd.nodes or [] %}
@@ -56,6 +79,7 @@
   <tr><th>Runs as</th><td>{{ spec.runAsUser or app.owner }}</td></tr>
   <tr><th>Resources</th><td>{{ (spec.resources or {}).requests }} → limits {{ (spec.resources or {}).limits }}</td></tr>
   <tr><th>Login required</th><td>{{ 'no (public)' if (svc.http or {}).noNetworkAuthorization else 'yes (DataOS)' }}</td></tr>
+  <tr><th>Volumes</th><td>{% for v in svc.volumes or [] %}<code>{{ v.id }}</code> at <code>{{ v.directory }}</code>{{ ' (read-only)' if v.readOnly }}<br>{% else %}<span class="muted">none: files are lost on restart</span>{% endfor %}</td></tr>
   <tr><th>Secrets</th><td>{% for x in svc.secrets or [] %}<code>{{ x.id }}</code> {% else %}<span class="muted">none</span>{% endfor %}</td></tr>
 </table></div>
 {% endif %}
@@ -175,6 +199,24 @@
   <div class="empty">This app isn't protected by dapp sign-in, so this list doesn't apply. Redeploy it with dapp (the default is private).</div>
 {% endif %}
 </div>
+
+{% if requests is defined and requests is not none %}
+<h2>Access requests{% if requests and requests is not mapping %} <span class="pill warn">{{ requests|length }}</span>{% endif %}</h2>
+<div class="panel">
+{% if requests is mapping %}<div class="muted">Requests are unavailable: {{ requests.error }}</div>
+{% elif requests %}
+  <table><thead><tr><th>Who</th><th>Note</th><th>Asked</th><th></th></tr></thead><tbody>
+  {% for r in requests %}<tr><td><b>{{ r.who }}</b></td><td>{{ r.note or '–' }}</td><td>{{ r.created|when }}</td>
+    <td style="white-space:nowrap">
+      <form class="inline" method="post" action="{{ root }}/apps/{{ name }}/requests/{{ r.id }}/approve"
+            onsubmit="return confirm('Let {{ r.who }} open {{ name }}? The app restarts to apply it (about 40 seconds).')">
+        <input type="hidden" name="csrf" value="{{ s.csrf }}"><button class="primary">Approve</button></form>
+      <form class="inline" method="post" action="{{ root }}/apps/{{ name }}/requests/{{ r.id }}/deny">
+        <input type="hidden" name="csrf" value="{{ s.csrf }}"><button>Decline</button></form></td></tr>{% endfor %}
+  </tbody></table>
+{% else %}<div class="empty">Nobody is waiting. Someone who opens this app without access sees a <b>Request access</b> link; it lands here.</div>{% endif %}
+</div>
+{% endif %}
 
 {% if allow and allow.mode == 'login' %}
 <h2>Add people</h2>

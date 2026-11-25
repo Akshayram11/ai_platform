@@ -79,6 +79,12 @@ class Settings:
         self.users = _env_list("DAPP_ALLOWED_USERS")
         self.roles = _env_list("DAPP_ALLOWED_ROLES")
         self.disabled = os.environ.get("DAPP_AUTH", "oidc") == "off"
+        # where "No access" sends people to ask the owner (the dashboard keeps the requests)
+        origin = self.public_url.split("://", 1)[0] + "://" + self.public_url.split("://", 1)[1].split("/", 1)[0] \
+            if "://" in self.public_url else ""
+        self.dashboard_url = (os.environ.get("DAPP_DASHBOARD_URL") or (origin + "/dapp" if origin else "")).rstrip("/")
+        path = self.base_path.strip("/")
+        self.app_name = os.environ.get("DAPP_APP_NAME") or (path if "/" not in path else "")
 
     @property
     def base_path(self) -> str:
@@ -92,6 +98,14 @@ class Settings:
                 "clientSecret": self.client_secret, "DAPP_PUBLIC_URL": self.public_url,
                 "DAPP_HEIMDALL_URL": self.heimdall}
         return [k for k, v in need.items() if not v]
+
+
+def ask_link(st: Settings) -> str:
+    """A button-like link to the dashboard's request page, when this app and the dashboard are known."""
+    if not (st.app_name and st.dashboard_url):
+        return ""
+    return (f" <a href='{st.dashboard_url}/request-access?app={quote(st.app_name)}' "
+            f"style='font-weight:600'>Request access</a> (the owner sees it in the dashboard).")
 
 
 class Login:
@@ -324,8 +338,8 @@ def protect(app, *, settings: Settings | None = None, public_paths: tuple[str, .
             return await send_simple(send, 403, PAGE.format(
                 title="No access",
                 body=f"You're signed in as <b>{ident['id']}</b>, but this app hasn't been shared with you. "
-                     f"Ask an owner to run <code>dapp access allow &lt;app&gt; {ident['id']}</code>. "
-                     f"<a href='{base}/_dapp/logout'>Sign out</a>"))
+                     f"Ask an owner to run <code>dapp access allow &lt;app&gt; {ident['id']}</code>."
+                     f"{ask_link(login.s)} <a href='{base}/_dapp/logout'>Sign out</a>"))
         if rel == "/_dapp/me":
             return await send_simple(send, 200, json.dumps(ident), ctype="application/json")
 

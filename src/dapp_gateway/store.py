@@ -193,7 +193,7 @@ class Store:
             s.add(Usage(**row))
 
     def summary(self, *, owner: str | None, app: str | None, tenant: str | None, since_hours: int,
-                group_by: list[str]) -> list[dict]:
+                group_by: list[str], model: str | None = None) -> list[dict]:
         group_by = [g for g in group_by if g in GROUPABLE] or ["app"]
         cols = []
         for g in group_by:
@@ -216,6 +216,8 @@ class Store:
             q = q.where(Usage.app == app)
         if tenant:
             q = q.where(Usage.tenant == tenant)
+        if model:
+            q = q.where(Usage.model == model)
         q = q.group_by(*cols).order_by(*cols)
         with Session(self.engine) as s:
             rows = [dict(r._mapping) for r in s.execute(q)]

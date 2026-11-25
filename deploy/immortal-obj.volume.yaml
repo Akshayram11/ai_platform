@@ -1,0 +1,14 @@
+# Storage for immortal-obj: the per-user / per-app object store (agent memory, app data, Claude workspaces).
+# A Volume lives on its own: updating or deleting the service that mounts it leaves the data alone.
+# Grow it by raising size and re-applying (no data loss). Only one pod can mount it at a time.
+name: immortal-obj
+version: v2alpha
+type: volume
+description: Storage for immortal-obj (object store for agents and apps)
+tags:
+  - dapp
+  - immortal-obj
+volume:
+  size: 5Gi
+  type: disk
+  dataplane: poldp01

@@ -11,16 +11,18 @@
 name: chatbot
 title: DataOS Chatbot
 description: OpenAI chatbot deployed with dapp
-image: docker.io/tmdcio/dapp-chatbot:0.1.9   # docker build -f examples/chatbot/Dockerfile -t docker.io/tmdcio/dapp-chatbot:0.1.9 .
+image: docker.io/tmdcio/dapp-chatbot:0.1.12   # docker build -f examples/chatbot/Dockerfile -t docker.io/tmdcio/dapp-chatbot:0.1.12 .
 port: 8080
 command: [sh, -c, "uvicorn app:app --host 0.0.0.0 --port 8080 --proxy-headers"]
-compute: runnable-default
+compute: engineering-compute
 path: /chatbot
 resources: {cpu: 100m, memory: 192Mi, cpuLimit: 500m, memoryLimit: 384Mi}
 llm: true
+objects: true            # chat history is kept in immortal-obj (one object per person); survives restarts
 metrics: true            # the app runs dapp_metrics; the dashboard shows its CPU and memory
 env:
   ROOT_PATH: /chatbot
   OPENAI_MODEL: gpt-6-luna
+  OPENAI_MODELS: small            # also offered in the page: Qwen2.5-0.5B served inside DataOS (apps/llm-small)
   OPENAI_REASONING_EFFORT: low   # gpt-6-luna reasons by default (medium); low keeps a chat fast and cheap
 # secrets: [dapp-chatbot-openai]   # Option B only

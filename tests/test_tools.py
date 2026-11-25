@@ -86,6 +86,9 @@ def test_register_use_and_record(c):
     up = seen[-1]
     assert up.headers["authorization"] == "Bearer tool-secret"   # credential injected by the gateway...
     assert "apikey" not in up.headers and up.headers["x-dapp-user"] == "alice"  # ...the caller's own never forwarded
+    assert up.headers["x-dapp-caller"] == "alice" and "x-dapp-end-user" not in up.headers
+    rpc(c, {**ALICE, "x-dapp-caller": "app:evil"})            # a client can't claim to be someone else
+    assert seen[-1].headers["x-dapp-caller"] == "alice"
 
     assert c.post("/admin/tools/ai/calc/access", json={"allow": ["bob"]}, headers=BOB).status_code == 403
     assert c.post("/admin/tools/ai/calc/access", json={"allow": ["bob"]}, headers=ALICE).json()["allow"] == ["bob"]
@@ -96,10 +99,10 @@ def test_register_use_and_record(c):
 
     u = c.get("/admin/tool-usage?group_by=caller,tool_name", headers=ALICE).json()
     rows = {(r["caller"], r["tool_name"]): r for r in u["rows"]}
-    assert rows[("alice", "")]["calls"] == 1
+    assert rows[("alice", "")]["calls"] == 2
     assert rows[("bob", "add")]["calls"] == 1 and rows[("bob", "add")]["errors"] == 0
     assert rows[("bob", "boom")]["errors"] == 1                # isError in an SSE reply counts as a failed call
-    assert u["total"] == {"calls": 3, "errors": 1}
+    assert u["total"] == {"calls": 4, "errors": 1}
     assert c.get("/admin/tool-usage", headers=BOB).json()["rows"] == []   # usage is the owner's to see
 
     # bob can see the tool exists (he may use it) but not its url, credential header or allow list
@@ -121,10 +124,16 @@ def test_everyone_and_apps(c):
     c.post("/admin/tools/ai/calc/access", json={"allow": ["app:chatbot"]}, headers=ALICE)
     assert rpc(c, app_h).status_code == 200
     assert seen[-1].headers["x-dapp-user"] == "dave"          # the tool learns which person used the app
+    assert seen[-1].headers["x-dapp-caller"] == "app:chatbot" and seen[-1].headers["x-dapp-end-user"] == "dave"
+    c.post("/admin/tools/ai/calc/access", json={"deny": ["app:chatbot"], "allow": ["app:*"]}, headers=ALICE)
+    other = c.post("/admin/keys", json={"app": "other", "tenant": "ai"}, headers=ALICE).json()["key"]
+    assert rpc(c, {"authorization": f"Bearer {other}"}).status_code == 200   # app:* = every app
     rows = c.get("/admin/tool-usage?group_by=caller,end_user", headers=ALICE).json()["rows"]
     assert {"caller": "app:chatbot", "end_user": "dave"}.items() <= next(
         r for r in rows if r["caller"] == "app:chatbot").items()
     assert rpc(c, {"authorization": "Bearer dapp_revoked"}).status_code == 401
+    mine = c.post("/admin/keys/personal", json={"tenant": "ai"}, headers=ALICE).json()["key"]
+    assert rpc(c, {"authorization": f"Bearer {mine}"}).status_code == 403  # personal keys are for LLM calls only
 
 
 def test_only_the_owner_changes_or_deletes(c):

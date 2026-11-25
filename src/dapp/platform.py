@@ -22,6 +22,7 @@ from .spec import (
     ALLOWED_ROLES_ENV,
     ALLOWED_USERS_ENV,
     DAPP_TAG,
+    OBJECTS_TOOL,
     AppSpec,
     app_tag,
     llm_secret_name,
@@ -33,7 +34,7 @@ from .spec import (
     wire_manifest,
     yaml_decode,
 )
-from .usage import GatewayUsage, Prometheus, observability_url
+from .usage import GatewayUsage, Prometheus, observability_url, service_of
 
 log = logging.getLogger("dapp.platform")
 
@@ -198,6 +199,10 @@ class Platform:
                     "DAPP_TOOLS": ",".join(spec.tools),
                     "DAPP_TOOLS_URL": f"{gateway_internal_url()}/mcp/{tenant}", **spec.env}})
                 notes.append(f"MCP tools via the gateway: {', '.join(spec.tools)}")
+            if OBJECTS_TOOL in spec.tools:
+                spec = spec.model_copy(update={"env": {
+                    "DAPP_OBJECTS_URL": f"{gateway_internal_url()}/mcp/{tenant}/{OBJECTS_TOOL}", **spec.env}})
+                notes.append("durable storage: immortal-obj (objects are this app's own: app:" + spec.name + ")")
         code = None
         if spec.runtime:
             code = pack(spec.code)
@@ -494,6 +499,11 @@ class Platform:
         """The caller's gateway keys: prefix, app, state. The key itself can't be shown, the gateway keeps a hash."""
         return self._gateway().list_keys()
 
+    def personal_llm_key(self, *, rotate: bool = False) -> dict[str, Any]:
+        """Your own gateway key (app user:<you>), for calling the LLMs from outside DataOS."""
+        r = self._gateway().issue_personal_key(self.ctx.tenant, rotate=rotate)
+        return {**r, "base_url": f"{gateway_public_url(self.ctx)}/openai/v1"}
+
     def _llm_secret_of(self, app: str) -> str:
         a = self.get_app(app)
         want = llm_secret_name(app)
@@ -573,7 +583,20 @@ class Platform:
     # ---------- usage ----------
     def compute_usage(self, app: str) -> dict[str, Any]:
         url = os.environ.get("DAPP_PROMETHEUS_URL") or observability_url(self.ctx.base_url)
-        return Prometheus(url, headers=self.ctx.auth_headers()).app_now(app, self.ctx.tenant)
+        if app.startswith("user:"):  # a personal LLM key: calls from a laptop, no pods in DataOS
+            return {"note": "personal LLM key: no compute in DataOS"}
+        service = self.service_name(app)
+        if not service:
+            return {"error": f"{app} has no running pods, so its compute can't be told apart from same-named apps"}
+        return Prometheus(url, headers=self.ctx.auth_headers()).app_now(app, self.ctx.tenant, service)
+
+    def service_name(self, app: str) -> str | None:
+        """The DataOS service behind your app; metrics are filtered by it (job_name alone is shared by same-named
+        apps of other people)."""
+        try:
+            return service_of(self.client.runtime("app", app))
+        except DataOSError:
+            return None
 
     def llm_usage(self, app: str | None = None, since_hours: int = 24 * 30,
                   group_by: str = "app,model") -> dict[str, Any]:
@@ -623,6 +646,8 @@ class Platform:
         """Let the app call each tool. Works for tools you own; for someone else's, say who has to do it."""
         notes = []
         for t in tools:
+            if t == OBJECTS_TOOL:
+                continue                            # open to every app (app:*); each app only sees its own objects
             try:
                 self._gateway().tool_access(self.ctx.tenant, t, [f"app:{app}"], [])
                 notes.append(f"tool {t}: app:{app} allowed")
