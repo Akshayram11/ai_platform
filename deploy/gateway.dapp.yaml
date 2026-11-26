@@ -20,7 +20,7 @@ env:
   DATAOS_FQDN: poliks.instance.dataos.cloud
   DATABASE_URL: sqlite:////data/gateway.db     # overridden by the secret when it sets DATABASE_URL
   # MCP tools: plain-http in-cluster hosts the gateway may proxy to (everything else must be public https)
-  DAPP_TOOL_INTERNAL_HOSTS: demo-tools,immortal-obj
+  DAPP_TOOL_INTERNAL_HOSTS: demo-tools,immortal-obj,dapp-monitor
   # Models served inside DataOS are deployed from the dashboard's Models tab and registered in the gateway. A fixed one can still be
   # configured here (apps/llm-small was one; it was removed on 2026-11-25), keyed by name, with its key from dapp-gateway-local:
   # DAPP_LOCAL_MODELS: '{"small": {"url": "http://llm-small:8080", "key_env": "LLM_SMALL_KEY"}}'

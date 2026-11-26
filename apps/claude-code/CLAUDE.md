@@ -53,6 +53,40 @@ If it says the user can't use a Depot: nothing was created. **Never try to grant
 ### A custom app
 Make one folder per app and deploy from source (next section), or start from a ready image with `dapp init NAME --template chatbot`.
 
+## Your machine: terminal, a shared desktop, previews, a disk
+This terminal runs in your own machine on DataOS. The user sees the same screen you do, next to this terminal, and can use it too.
+
+**Browser** (MCP server `browser`, Playwright: open a URL, click, type, read the page, screenshots). Best for web pages: precise, and
+it doesn't move the real mouse. Use it to check an app you deployed or are running here, to read a page, or to reproduce a bug.
+
+**The whole screen** (MCP server `desktop`): `screenshot` (the whole desktop as an image: look before you act and after),
+`click(x, y)`, `type_text`, `key("ctrl+l")`, `scroll`, `wait`. Coordinates are pixels of the last screenshot. Use it for what the
+browser tools can't reach: a dialog, a desktop app (right-click the desktop for a terminal or the file manager), or to see what the
+user is doing. While you use it the page shows "Claude is using the mouse and keyboard"; if a tool says **the user has taken
+over**, stop, tell them what you were doing, and wait until they press "Give back to Claude" (screenshot still works).
+
+The desktop starts the first time either is used (a few seconds) and stops after 15 minutes unused. Sign-ins: if a site needs one, ask
+the user to sign in on the screen themselves, then carry on in that session; never ask for, type or read a password. Pages behind
+DataOS sign-in work only after the user signed in there.
+
+**Previews**: a server you run here on a port (1024-32767) opens for the user at `https://$DATAOS_FQDN/claude-code/port/<port>/`
+(only them, behind DataOS sign-in), and the page lists running ports under "Preview". The app gets requests at `/` but the browser
+sees `/claude-code/port/<port>/`, so use relative links, or set the base path (Vite `--base /claude-code/port/5173/`, Streamlit
+`--server.baseUrlPath claude-code/port/8501`). Bind to 127.0.0.1 or 0.0.0.0. In the shared browser, `http://localhost:<port>/` works
+directly.
+
+**Disk**: when this machine has its own disk (`$HOME` is `/data/home`), everything under `$HOME` survives restarts and deploys: code,
+`.git`, virtualenvs, `node_modules`, the browser's sign-ins. Install tools as the user (`pip install --user`, `uv`, `npm`); there is no
+root, no `apt`, and no Docker here (deploy apps with `dapp`). Check space with `df -h $HOME` and clean caches if it fills up.
+
+## Watching apps: status, logs now, logs at any time
+- `dapp logs NAME` is the running pod's last lines. For anything in the past ("why did it crash last night?", "errors between 16:00
+  and 17:00"), search DataOS's stored logs, old and crashed pods included: `dapp logs NAME --search error --since 24h`,
+  `--from 2026-11-26T16:00:00Z --to 2026-11-26T17:00:00Z`, `--stream stderr`, `--kind service` for a service. Times are UTC.
+- An app can do the same through the gateway tool `dapp-monitor` (`tools: [dapp-monitor]` with `llm: true`): `list_resources`,
+  `status`, `recent_logs`, `search_logs`, `log_summary`, each with `kind` (app or service). It searches the app's own container
+  (not DataOS's log shipper) and masks credentials. Ask the owner to allow your app on it (`dapp tool allow dapp-monitor app:NAME`).
+
 ## Apps from source (`runtime:`): no Docker
 
 Make one folder per app, e.g. `~/work/sales-dash/`, with the code in `app/` and a `dapp.yaml` next to it:
@@ -140,6 +174,6 @@ dapp rm NAME --yes                     # only when the user asks
 3. Tell the user the URL `https://$DATAOS_FQDN/NAME/`, who can open it, how to share it, and (for models) which one, its estimated cost per day, and how to delete it.
 If a call fails with "connection refused" or 502 for about a minute, DataOS is moving the gateway: wait and retry, don't rebuild anything.
 
-~/work is saved every 30 s to your immortal-obj volume `workspace` (and restored when this terminal restarts),
-except caches, virtualenvs, .git, .env/keys, databases and files over 700 KB. Your Claude conversations are saved too
+~/work is also copied every 30 s to your immortal-obj volume `workspace` (a backup, and what is restored when there is no disk),
+except caches, virtualenvs, .git, .env/keys, databases and files over 700 KB. Your Claude conversations are copied too
 (`claude-sessions`). The Claude sign-in survives restarts when the app has a token secret (see apps/claude-code/dapp.yaml).

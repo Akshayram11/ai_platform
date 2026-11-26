@@ -20,7 +20,10 @@ from .spec import AppSpec, dump_yaml, wire_manifest
 
 
 def build_server(context: str | None = None, tenant: str | None = None):
-    from mcp.server.fastmcp import FastMCP
+    try:                                   # mcp 2.x renamed FastMCP to MCPServer
+        from mcp.server.mcpserver import MCPServer as FastMCP
+    except ImportError:                    # mcp 1.x
+        from mcp.server.fastmcp import FastMCP
 
     mcp = FastMCP(
         "dapp",
@@ -69,8 +72,18 @@ def build_server(context: str | None = None, tenant: str | None = None):
 
     @mcp.tool()
     def app_logs(name: str, tail: int = 100, pod: str | None = None) -> str:
-        """Recent container logs of an app."""
+        """Recent container logs of an app (the running pod's last lines)."""
         return platform().logs_text(name, tail=tail, node=pod)
+
+    @mcp.tool()
+    def search_logs(name: str, query: str = "*", since: str | None = None, start: str | None = None, end: str | None = None,
+                    stream: str | None = None, pod: str | None = None, limit: int = 100, offset: int = 0,
+                    kind: str = "app") -> dict[str, Any]:
+        """Search the stored logs of an app (or kind=nilus/service/workflow) over any time range, old and crashed pods
+        included. query: a keyword or "*". Time: since="1h" (30m, 24h, 7d) or start/end (ISO like 2026-11-26T16:00:00Z,
+        epoch seconds, or "2h ago"); default the last hour. stream: stdout or stderr. Returns total and lines (oldest first)."""
+        return platform().search_logs(name, kind=kind, query=query, since=since, start=start, end=end, stream=stream,
+                                      pod=pod, limit=limit, offset=offset)
 
     @mcp.tool()
     def scale_app(name: str, replicas: int) -> dict[str, Any]:

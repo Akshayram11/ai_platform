@@ -1,0 +1,27 @@
+# dapp-monitor: an MCP tool for watching DataOS apps (status, pods, recent logs, stored logs over any time range, error counts),
+# behind the dapp gateway. Read-only. It reads as this app's owner, and only the apps in LOGS_APPS ("*" = every app the owner owns).
+# Set up once (TOOL_TOKEN is a random secret shared by this server and the gateway; never print it):
+#   python3 -c 'import secrets; print("TOOL_TOKEN=" + secrets.token_urlsafe(32))' > apps/dapp-monitor/.env      # gitignored
+#   dapp secret set dapp-monitor token --from-env-file apps/dapp-monitor/.env --no-attach
+#   dapp deploy -f apps/dapp-monitor/dapp.yaml
+#   (set -a; . apps/dapp-monitor/.env; set +a; dapp tool add dapp-monitor --url http://dapp-monitor:8080/mcp --auth-env TOOL_TOKEN \
+#        -d "watch DataOS apps: status, pods, recent logs, logs over any time range, error counts")
+#   dapp tool allow dapp-monitor <user-or-app:name> ...       # who may use it (the gateway checks and records every call)
+# The gateway must list `dapp-monitor` in DAPP_TOOL_INTERNAL_HOSTS (deploy/gateway.dapp.yaml).
+name: dapp-monitor
+description: MCP tool to watch DataOS apps (status, recent and stored logs, error counts), read-only, behind the dapp gateway
+runtime: python-3.12
+code: ./app
+run: python server.py
+compute: engineering-compute
+hostname: dapp-monitor           # the gateway reaches it in-cluster at http://dapp-monitor:8080/mcp
+path: /dapp-monitor
+public: true                    # no DataOS sign-in on the server itself: it refuses every call without TOOL_TOKEN
+resources: {cpu: 50m, memory: 128Mi, cpuLimit: 500m, memoryLimit: 384Mi}
+secrets: [dapp-dapp-monitor-token]
+env:
+  DATAOS_FQDN: poliks.instance.dataos.cloud
+  TOOL_ALLOWED_HOSTS: dapp-monitor:8080,dapp-monitor
+  # what may be watched: "*" = everything this app's owner owns (apps, services ...), or a list like
+  # "chatbot, service:orders-api" (a bare name is an app)
+  MONITOR_ALLOW: "*"

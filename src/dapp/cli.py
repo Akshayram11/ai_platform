@@ -359,10 +359,26 @@ def status(name: str) -> None:
 
 
 @app.command()
-def logs(name: str, tail: int = typer.Option(100, "--tail", "-n"),
-         pod: str | None = typer.Option(None, help="Pod (node) name")) -> None:
-    """Recent logs of the app's containers."""
+def logs(name: str, tail: int = typer.Option(100, "--tail", "-n", help="Lines (the running pod), or results (with a search)"),
+         pod: str | None = typer.Option(None, help="Pod (node) name"),
+         search: str | None = typer.Option(None, "--search", "-s", help="Search stored logs for a keyword (* for all)"),
+         since: str | None = typer.Option(None, "--since", help="Stored logs of the last 30m, 1h, 24h, 7d ..."),
+         start: str | None = typer.Option(None, "--from", help="Stored logs from this time: 2026-11-26T16:00:00Z, '2h ago'"),
+         end: str | None = typer.Option(None, "--to", help="... to this time (default now)"),
+         stream: str | None = typer.Option(None, "--stream", help="stdout or stderr (stored logs)"),
+         kind: str = typer.Option("app", "--kind", help="Resource type for stored logs: app, nilus, service, workflow")) -> None:
+    """Logs of an app. Plain: the running pod's last lines. With --search/--since/--from: DataOS's stored logs over any time
+    range, crashed and replaced pods included (e.g. `dapp logs chatbot --search error --since 24h`)."""
     p = lambda: _platform()
+    if any(v is not None for v in (search, since, start, end, stream)) or kind != "app":
+        def go():
+            r = p().search_logs(name, kind=kind, query=search or "*", since=since, start=start, end=end, pod=pod,
+                                stream=stream, limit=min(max(tail, 1), 1000))
+            _out(r, lambda x: [console.print(f"{l['time']}  {l['stream'] or '':6} {(l['pod'] or '')[-12:]:12} {l['message']}",
+                                             markup=False, highlight=False) for l in x["lines"]]
+                 or console.print(f"[dim]{x['returned']} of {x['total']} lines[/dim]"))
+        _run(go)
+        return
     _run(lambda: _out(p().logs(name, tail=tail, node=pod)) if state.json
          else console.print(p().logs_text(name, tail=tail, node=pod), markup=False, highlight=False))
 

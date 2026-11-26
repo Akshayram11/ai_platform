@@ -1,0 +1,15 @@
+# The disk of Claude Code's machine (apps/claude-code): its whole home lives here, so code, .git, virtualenvs and the
+# browser's sign-ins survive restarts and deploys. Updating or deleting the app leaves the data alone.
+# Grow it by raising size and re-applying. Only one pod can mount it at a time.
+#   dataos-ctl resource apply -f apps/claude-code/home.volume.yaml
+name: claude-code-home
+version: v2alpha
+type: volume
+description: Home disk of the claude-code machine (code, browser profile, tools)
+tags:
+  - dapp
+  - claude-code
+volume:
+  size: 20Gi
+  type: disk
+  dataplane: poldp01

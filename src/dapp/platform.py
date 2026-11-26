@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from . import logsearch
 from .claude import (
     TOKEN_KEY,
     ClaudeDeploy,
@@ -246,6 +247,14 @@ class Platform:
 
     def logs_text(self, name: str, *, tail: int = 100, node: str | None = None) -> str:
         return flatten_logs(self.logs(name, tail=tail, node=node))
+
+    def search_logs(self, name: str, *, kind: str = "app", version: str | None = None, **query: Any) -> dict[str, Any]:
+        """Stored logs of a resource over any time range (old pods included), by keyword: see dapp.logsearch."""
+        try:
+            return logsearch.search(self.ctx.base_url, self.ctx.tenant, self.ctx.auth_headers(), name, kind=kind,
+                                    version=version, client=self.client.http, **query)
+        except logsearch.LogSearchError as e:
+            raise PlatformError(str(e)) from e
 
     # ---------- deploy / lifecycle ----------
     def plan(self, spec: AppSpec, *, compute: str | None = None) -> DeployPlan:

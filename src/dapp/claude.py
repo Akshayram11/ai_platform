@@ -16,10 +16,11 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from .models import mebibytes, milli_cpu
 from .spec import AppSpec
 
-CLAUDE_CODE_IMAGE = "docker.io/tmdcio/dapp-claude-code:0.1.7"   # built from apps/claude-code
+CLAUDE_CODE_IMAGE = "docker.io/tmdcio/dapp-claude-code:0.1.12"   # built from apps/claude-code
 CLAUDE_TAG = "dapp-claude"
 TOKEN_KEY = "CLAUDE_CODE_OAUTH_TOKEN"
-DEFAULTS = {"cpu": "250m", "cpu_limit": "2", "memory": "1Gi", "memory_limit": "2Gi"}   # real use peaks near 350 MiB; builds need the burst
+# Claude alone peaks near 350 MiB; the on-demand browser (Chromium, Xvfb, noVNC) adds ~1-1.5 GiB while it runs and nothing when stopped
+DEFAULTS = {"cpu": "500m", "cpu_limit": "4", "memory": "2560Mi", "memory_limit": "6Gi"}
 
 
 def instance_name(user_id: str) -> str:
