@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}Deploy {{ entry.title if entry else 'a custom model' }} · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% macro dots(n, total=5) -%}<span class="dots">{{ '●' * n }}<i>{{ '○' * (total - n) }}</i></span>{%- endmacro %}
+{% macro field(label, name, hint='', type='text', required=false) -%}
+<label>{{ label }}<input name="{{ name }}" type="{{ type }}" value="{{ form.get(name, '') }}" {{ 'required' if required }} {% if type == 'number' %}step="any"{% endif %}>{% if hint %}<small>{{ hint }}</small>{% endif %}</label>
+{%- endmacro %}
+{% macro choice(label, name, options, hint='') -%}
+<label>{{ label }}<select name="{{ name }}">{% for o in options %}<option value="{{ o }}" {{ 'selected' if form.get(name) == o }}>{{ o }}</option>{% endfor %}</select>{% if hint %}<small>{{ hint }}</small>{% endif %}</label>
+{%- endmacro %}
+{% block body %}
+<p class="sub" style="margin-bottom:8px"><a href="{{ root }}/models">← Models</a></p>
+<h1>Deploy {{ entry.title if entry else 'a custom model' }}</h1>
+<p class="sub">{% if entry %}{{ entry.note }} <span class="muted">{{ entry.size_gb }} GB file · {{ entry.license }} · <a href="{{ entry.url }}" target="_blank" rel="noopener">Hugging Face ↗</a></span>
+{% else %}Any GGUF repo on Hugging Face that llama.cpp can load.{% endif %}</p>
+{% if error_text %}<div class="flash err">{{ error_text }}</div>{% endif %}
+
+{% if card %}
+<div class="panel" style="display:flex;gap:28px;flex-wrap:wrap;align-items:center">
+  <div class="bars" style="min-width:230px"><span>Quality</span><span>{{ dots(card.quality) }}</span><span>Speed</span><span>{{ dots(card.speed) }}</span></div>
+  <div>{% for t in card.traits %}<span class="chip">{{ t }}</span> {% endfor %}</div>
+  <div class="muted" style="font-size:12.5px">Quality is a rough guide, not a benchmark. Speed: {{ card.speed_word }}, about {{ card.est.words_per_s|round|int }} words per second.</div>
+</div>
+{% endif %}
+
+<form method="post" action="{{ root }}/models/deploy">
+  <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="model_id" value="{{ form.model_id }}">
+  <div class="panel">
+    <div class="fields" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
+      {{ field('Model name', 'name', "What callers put in \"model\". Lower-case letters, digits, . and -", required=true) }}
+      {% if not entry %}{{ field('Hugging Face model', 'hf', 'owner/repo or owner/repo:Quant, e.g. Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M', required=true) }}{% endif %}
+    </div>
+    <p style="margin:0 0 6px"><b>Defaults for {{ entry.title if entry else 'a custom model' }}:</b>
+      {{ form.cpu_limit }} CPU, {{ form.memory_limit }} memory, {{ form.disk_gi }} Gi disk, {{ form.ctx }}-token context. Open <b>Customize</b> to change anything.</p>
+    {% if why %}<ul class="muted" style="margin:0;padding-left:18px;font-size:12.5px">{% for line in why %}<li>{{ line }}</li>{% endfor %}</ul>
+    {% else %}<p class="muted" style="margin:0;font-size:12.5px">A custom model's size isn't known up front, so these are general defaults. Choose a quantization in Customize and check the memory against the file size.</p>{% endif %}
+  </div>
+
+  {% if est %}
+  <div class="panel" id="estimate">
+    <h3 style="margin:0 0 10px">Estimated running cost <span class="muted" style="font-weight:400;font-size:12px">· updates as you change CPU, memory, disk or quantization</span></h3>
+    <div class="kpis" style="margin-bottom:8px">
+      <div class="kpi"><div class="label">Per day, always on</div><div class="value" id="e-day">{{ est.day|money }}</div></div>
+      <div class="kpi"><div class="label">Per month</div><div class="value" id="e-month">{{ est.month|money }}</div></div>
+      <div class="kpi"><div class="label">At most (uses full limits)</div><div class="value" id="e-max">{{ est.day_max|money }}<span style="font-size:12px;font-weight:400">/day</span></div></div>
+      <div class="kpi"><div class="label">Writing speed</div><div class="value" id="e-speed">~{{ est.words_per_s|round|int }}<span style="font-size:12px;font-weight:400"> words/s</span></div></div>
+      <div class="kpi"><div class="label">Per 1M tokens when busy</div><div class="value" id="e-tok">{{ est.per_million_tokens|money }}</div></div>
+    </div>
+    <p class="muted" style="margin:0;font-size:12px">Assumes {{ est_data.rates.currency }}{{ est_data.rates.cpu_hour }} per CPU-hour, {{ est_data.rates.currency }}{{ est_data.rates.gb_hour }} per GB-hour of memory and
+      {{ est_data.rates.currency }}{{ est_data.rates.disk_gb_month }} per GB-month of disk, on what the pod reserves. DataOS doesn't bill these apps here, so treat it as a comparison between models, not a bill.
+      An idle model still costs its reservation; delete it when you're done.</p>
+  </div>
+  {% endif %}
+
+  <details class="customize" {{ 'open' if open_custom }}>
+    <summary>Customize</summary>
+
+    <h3>Model</h3>
+    <div class="fields">
+      {% if quants %}<label>Quantization<select name="quant">{% for q, gb in quants.items()|sort %}<option value="{{ q }}" {{ 'selected' if form.get('quant')|upper == q }}>{{ q }} ({{ gb }} GB)</option>{% endfor %}</select>
+        <small>Smaller = faster and lighter, a little less accurate. Q4_K_M is the usual choice.</small></label>
+      {% else %}{{ field('Quantization', 'quant', 'e.g. Q4_K_M, Q5_K_M, Q8_0, F16. Empty: the one in the repo name or the repo default') }}{% endif %}
+    </div>
+
+    <h3>DataOS resources</h3>
+    <div class="fields">
+      {{ field('Compute', 'compute', 'The compute resource the pod runs on; you need Can Use on it') }}
+      {{ field('CPU request', 'cpu', 'Reserved for it: 500m, 1, 2') }}
+      {{ field('CPU limit', 'cpu_limit', 'At most this many cores (8 max). Generation speed follows the cores') }}
+      {{ field('Memory request', 'memory', 'Reserved: 1Gi, 2Gi') }}
+      {{ field('Memory limit', 'memory_limit', 'Weights + context cache + headroom; too low and it is killed') }}
+      {{ field('Disk (Gi)', 'disk_gi', 'Volume that keeps the downloaded model (1 to 50)', 'number') }}
+    </div>
+
+    <h3>Server (llama.cpp)</h3>
+    <div class="fields">
+      {{ field('Context size (tokens)', 'ctx', 'Prompt + answer window per request. More uses more memory', 'number') }}
+      {{ field('Parallel requests', 'parallel', 'Slots: requests answered at once; each gets its own context. 1 to 8', 'number') }}
+      {{ field('Threads', 'threads', 'CPU threads for generation; match the CPU limit', 'number') }}
+      {{ field('Batch size', 'batch', 'Prompt tokens processed together (default 2048)', 'number') }}
+      {{ field('Micro-batch size', 'ubatch', 'Physical batch (default 512)', 'number') }}
+      {{ choice('Flash attention', 'flash_attn', ['auto', 'on', 'off'], 'Faster, less memory when supported') }}
+      {{ choice('KV cache type (keys)', 'cache_type_k', ['f16', 'q8_0', 'q4_0', 'bf16', 'f32'], 'q8_0 halves the cache memory') }}
+      {{ choice('KV cache type (values)', 'cache_type_v', ['f16', 'q8_0', 'q4_0', 'bf16', 'f32'], 'Quantized values need flash attention') }}
+      {{ field('Max tokens per reply', 'max_tokens', '-1 = until the model stops. Callers can still ask for less', 'number') }}
+      {{ choice('Reasoning / thinking', 'reasoning', ['auto', 'on', 'off'], 'For models with a thinking mode (Qwen3): on shows it, off skips it') }}
+      {{ choice('Jinja chat template', 'jinja', ['on', 'off'], 'Uses the template inside the model file') }}
+      {{ choice('Context shift', 'context_shift', ['off', 'on'], 'Lets very long chats slide their window instead of stopping') }}
+      {{ choice('Continuous batching', 'cont_batching', ['on', 'off'], 'Serves several requests together') }}
+      {{ field('Request timeout (s)', 'timeout_s', 'Server read/write timeout (30 to 86400)', 'number') }}
+    </div>
+
+    <h3>Sampling defaults (used when a caller doesn't set them; empty = llama.cpp's)</h3>
+    <div class="fields">
+      {{ field('Temperature', 'temperature', 'llama.cpp default 0.8; lower is steadier', 'number') }}
+      {{ field('Top-k', 'top_k', 'Default 40; 0 turns it off', 'number') }}
+      {{ field('Top-p', 'top_p', 'Default 0.95', 'number') }}
+      {{ field('Min-p', 'min_p', 'Default 0.05', 'number') }}
+      {{ field('Repeat penalty', 'repeat_penalty', 'Default 1.0 (off); 1.1 reduces loops', 'number') }}
+    </div>
+  </details>
+
+  <div class="row" style="align-items:center">
+    <button class="primary">Deploy</button>
+    <a href="{{ root }}/models" class="muted">Cancel</a>
+    <a href="{{ root }}/models/deploy?id={{ form.model_id|urlencode }}" class="muted" style="margin-left:auto;font-size:12px">Reset to defaults</a>
+  </div>
+</form>
+
+{% if est %}
+<script>
+(function () {
+  const E = {{ est_data|tojson }};
+  const R = E.rates, cur = R.currency;
+  const field = n => document.querySelector('[name="' + n + '"]');
+  const cpu = v => { v = String(v || '').trim(); return v.endsWith('m') ? parseFloat(v) / 1000 : parseFloat(v); };
+  const mem = v => { v = String(v || '').trim(); return v.endsWith('Gi') ? parseFloat(v) : v.endsWith('Mi') ? parseFloat(v) / 1024 : NaN; };
+  const money = x => !isFinite(x) ? '–' : x < 0.01 ? '<' + cur + '0.01' : cur + (x < 10 ? x.toFixed(2) : Math.round(x).toLocaleString());
+  const set = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+  function update() {
+    const q = field('quant'), size = (q && E.sizes[String(q.value).toUpperCase()]) || E.file_gb;
+    const hour = cpu(field('cpu').value) * R.cpu_hour + mem(field('memory').value) * R.gb_hour;
+    const top = cpu(field('cpu_limit').value) * R.cpu_hour + mem(field('memory_limit').value) * R.gb_hour;
+    const disk = parseFloat(field('disk_gi').value) * R.disk_gb_month, diskDay = disk / 30;
+    const tps = size ? Math.min(45, E.tokens_per_gb_s / size) : NaN;
+    set('e-day', money(hour * 24 + diskDay)); set('e-month', money(hour * 24 * 30 + disk));
+    set('e-max', money(top * 24 + diskDay) + '<span style="font-size:12px;font-weight:400">/day</span>');
+    set('e-speed', isFinite(tps) ? '~' + Math.round(tps * 0.75) + '<span style="font-size:12px;font-weight:400"> words/s</span>' : '–');
+    set('e-tok', isFinite(tps) ? money(hour / (tps * 3600) * 1e6) : '–');
+  }
+  ['quant', 'cpu', 'cpu_limit', 'memory', 'memory_limit', 'disk_gi'].forEach(n => { const el = field(n); if (el) el.addEventListener('input', update); });
+  update();
+})();
+</script>
+{% endif %}
+{% endblock %}

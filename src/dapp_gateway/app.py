@@ -19,10 +19,12 @@ Admin API (callers authenticate with their DataOS token/API key, verified by Hei
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 from urllib.parse import urlsplit
@@ -38,7 +40,7 @@ from dapp.client import DataOS, DataOSError
 from dapp.config import Context
 
 from .meter import Meter
-from .store import GROUPABLE, AppKey, Pricing, Store
+from .store import GROUPABLE, AppKey, LocalModel, Pricing, Store
 from .tools import Vault, mount_tools
 
 log = logging.getLogger("dapp.gateway")
@@ -96,6 +98,22 @@ class PersonalKeyRequest(BaseModel):
     rotate: bool = False  # true: the new key replaces (revokes) your earlier personal keys
 
 
+class ModelRequest(BaseModel):
+    tenant: str
+    name: str                 # what callers put in "model"
+    app: str                  # the DataOS app that serves it
+    url: str                  # http://<app>:8080
+    key: str = ""             # that server's own API key (kept encrypted)
+    repo: str = ""
+    description: str = ""
+
+
+# names that already mean something to a provider: a local model must not shadow them
+RESERVED_MODEL_PREFIXES = ("gpt", "o1", "o3", "o4", "chatgpt", "text-", "claude", "davinci", "babbage", "whisper", "dall-e",
+                           "tts", "omni", "gemini", "ft:", "ada", "curie", "computer-use", "codex")
+MODEL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,38}[a-z0-9]$")
+
+
 PERSONAL = "user:"  # app name of a personal key; ':' can't appear in a DataOS app name, so the two never clash
 
 
@@ -106,6 +124,7 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
     store = store or Store()
     heimdall = heimdall or (Heimdall(f"https://{fqdn}") if fqdn else None)
     pricing = Pricing()
+    vault = vault or Vault()
     admins = {a.strip() for a in os.environ.get("DAPP_GATEWAY_ADMINS", "").split(",") if a.strip()}
     upstream = httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10), transport=upstream_transport)
 
@@ -270,6 +289,87 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
             total["cost_partial"] = True
         return {"owner": owner or "*", "since_hours": since_hours, "rows": rows, "total": total}
 
+    # ------------------------------------------------------------ local models (deployed from the dashboard)
+    def model_view(m: LocalModel) -> dict[str, Any]:
+        return {"name": m.name, "tenant": m.tenant, "owner": m.owner, "app": m.app, "repo": m.repo,
+                "description": m.description, "created": m.created.isoformat(), "source": "dashboard"}
+
+    ready_cache: dict[str, tuple[float, bool]] = {}
+
+    async def model_ready(url: str) -> bool:
+        """Has the model server loaded its model? llama-server answers /health with 200 only then (503 while it loads)."""
+        now = time.monotonic()
+        hit = ready_cache.get(url)
+        if hit and hit[0] > now:
+            return hit[1]
+        try:
+            ok = (await upstream.get(f"{url.rstrip('/')}/health", timeout=2.0)).status_code == 200
+        except Exception:
+            ok = False
+        ready_cache[url] = (now + 5, ok)
+        return ok
+
+    async def local_model_rows(tenant: str | None) -> list[dict[str, Any]]:
+        """The models of a tenant: the gateway's own config and the ones people deployed, each with whether it is ready."""
+        rows = [({"name": n, "tenant": tenant or "", "owner": "", "app": urlsplit(c["url"]).hostname, "repo": "",
+                  "description": c.get("description", ""), "created": "", "source": "config"}, c["url"])
+                for n, c in sorted(local_models().items())]
+        rows += [(model_view(m), m.url) for m in store.list_models(tenant)]
+        flags = await asyncio.gather(*[model_ready(url) for _, url in rows])
+        return [{**row, "ready": ok} for (row, _), ok in zip(rows, flags, strict=True)]
+
+    @api.get("/admin/models")
+    async def list_local_models(tenant: str | None = None, ident: Identity = Depends(caller)) -> list[dict[str, Any]]:
+        return await local_model_rows(tenant)
+
+    @api.get("/local-models")
+    async def models_for_apps(request: Request) -> dict[str, Any]:
+        """For an app's own key: the local models its tenant can ask for, and which are ready now (the chatbot's drop-down)."""
+        key = app_key(request)
+        return {"models": [{k: r[k] for k in ("name", "repo", "app", "source", "ready")}
+                           for r in await local_model_rows(key.tenant)]}
+
+    @api.post("/admin/models")
+    def register_model(body: ModelRequest, request: Request, ident: Identity = Depends(caller)) -> dict[str, Any]:
+        name = body.name.strip().lower()
+        if not MODEL_NAME_RE.match(name) or name.startswith(RESERVED_MODEL_PREFIXES):
+            raise HTTPException(422, "model name: lower-case letters, digits, '.' and '-', 2-40 characters, and not a "
+                                     f"provider's own name ({', '.join(RESERVED_MODEL_PREFIXES[:6])}…)")
+        if name in local_models():
+            raise HTTPException(409, f"{name} is a model of the gateway's own configuration")
+        if body.url != f"http://{body.app}:8080":   # only the app's own in-cluster address: never an arbitrary URL
+            raise HTTPException(422, f"url must be http://{body.app}:8080, the address of the DataOS app that serves it")
+        require_owner(request, ident, body.tenant, body.app)
+        if app_owners(request, body.tenant, body.app) is None:
+            raise HTTPException(404, f"no DataOS app {body.tenant}/{body.app}: deploy it first")
+        if store.get_model(body.tenant, name):
+            raise HTTPException(409, f"model {name} already exists in {body.tenant}")
+        m = store.save_model(tenant=body.tenant, name=name, owner=ident.user_id, app=body.app, url=body.url,
+                             key_secret=vault.seal(body.key) if body.key else "", repo=body.repo[:256],
+                             description=body.description[:512])
+        log.info("registered model %s/%s (app %s) for %s", body.tenant, name, body.app, ident.user_id)
+        return model_view(m)
+
+    @api.delete("/admin/models/{tenant}/{name}")
+    def unregister_model(tenant: str, name: str, ident: Identity = Depends(caller)) -> dict[str, Any]:
+        m = store.get_model(tenant, name)
+        if m is None:
+            raise HTTPException(404, f"no model {tenant}/{name}")
+        if ident.user_id != m.owner and ident.user_id not in admins:
+            raise HTTPException(403, f"model {name} belongs to {m.owner}")
+        return {"deleted": store.delete_model(tenant, name), "name": name, "app": m.app}
+
+    def find_local_model(model: str, tenant: str) -> dict | None:
+        """The model server to use for this name: the gateway's own config first, then models people deployed."""
+        conf = local_models().get(model)
+        if conf:
+            return {"url": conf["url"], "key": os.environ.get(conf.get("key_env", ""), "") if conf.get("key_env") else "",
+                    "key_env": conf.get("key_env", "")}
+        m = store.get_model(tenant, model)
+        if m is None:
+            return None
+        return {"url": m.url, "key": vault.open(m.key_secret) if m.key_secret else "", "key_env": ""}
+
     # ------------------------------------------------------------ proxy
     def app_key(request: Request) -> AppKey:
         token = request.headers.get("x-api-key") or token_from_headers(request.headers)
@@ -287,14 +387,14 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
             except ValueError:
                 req_json = None
         model = req_json.get("model") if isinstance(req_json, dict) else None
-        local = local_models().get(model) if provider == "openai" and isinstance(model, str) else None
+        local = find_local_model(model, key.tenant) if provider == "openai" and isinstance(model, str) else None
         if local:
             provider = "local"
-            conf = {"upstream": lambda: local["url"], "key_env": local.get("key_env", ""),
+            conf = {"upstream": lambda: local["url"], "key_env": local["key_env"],
                     "auth": lambda k: {"authorization": f"Bearer {k}"}}
-            real_key = os.environ.get(conf["key_env"], "") if conf["key_env"] else ""
-            if conf["key_env"] and not real_key:
-                raise HTTPException(503, f"local model {model} is not configured on the gateway ({conf['key_env']})")
+            real_key = local["key"]
+            if local["key_env"] and not real_key:
+                raise HTTPException(503, f"local model {model} is not configured on the gateway ({local['key_env']})")
         else:
             conf = PROVIDERS[provider]
             real_key = os.environ.get(conf["key_env"])

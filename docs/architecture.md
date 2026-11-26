@@ -41,3 +41,8 @@ DataOS gives: Poros (run containers), Heimdall (identity), secrets, Volumes, com
 dapp adds: the one-file deploy, private-by-default apps with an allow list, LLM keys and metering, an in-DataOS
 model, tool governance, durable per-person storage, self-reported CPU/memory (DataOS does not collect pod metrics for
 app namespaces), the dashboard, and Claude Code that deploys for you.
+
+## When the gateway moves
+DataOS moves some pods to another node every so often (the gateway and llm-small together; the Volume has to detach and attach, about a minute).
+During that time calls to `dapp-gateway:8080` are refused. The dapp clients (`dapp_objects`, the MCP client in `examples/*/mcp_tools.py`, the Claude
+Code workspace sync) retry for 45 s by default, so a short move is invisible; a longer one shows as an error in the chat, and the next try works.

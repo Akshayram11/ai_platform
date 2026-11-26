@@ -45,7 +45,7 @@ BASE="${ROOT_PATH:-/}"
 # Bring back what was saved before the terminal opens; only if that worked, keep saving (a failed restore must not
 # overwrite the saved copy with an empty folder).
 SYNC_PID=""
-if timeout 90 python /opt/claude/workspace-sync.py pull; then
+if timeout 180 python /opt/claude/workspace-sync.py pull; then
   python /opt/claude/workspace-sync.py &
   SYNC_PID=$!
 else

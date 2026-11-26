@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}{{ m.name }} · Models · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% block body %}
+<p class="sub" style="margin-bottom:8px"><a href="{{ root }}/models">← Models</a></p>
+<div class="row" style="align-items:center;margin-bottom:4px">
+  <h1 style="margin:0">{{ m.name }}</h1>
+  <span class="pill {{ {'ready':'ok','failed':'bad'}.get(m.phase, 'warn') }}">{{ 'starting…' if m.phase == 'starting' else m.phase }}</span>
+  {% if m.source == 'config' %}<span class="pill">gateway config</span>{% elif m.mine %}<span class="pill ok">yours</span>{% else %}<span class="pill">{{ m.owner }}</span>{% endif %}
+</div>
+<p class="sub">{{ m.repo or m.description or 'A model served inside DataOS.' }}</p>
+
+{% if m.phase == 'starting' %}
+<div class="state-big" style="border-color:var(--warn)"><b>Starting.</b> The first start downloads the model file and loads it (a minute or two for a small model, more for a large one). This page refreshes by itself; the chatbot link works as soon as it shows <b>ready</b>.</div>
+{% elif m.phase == 'failed' %}
+<div class="state-big" style="border-color:var(--bad)"><b>The pod is not running.</b> Open <a href="{{ root }}/apps/{{ m.app }}?tab=logs">its logs</a>. Out of memory is the usual cause: raise the memory limit on <a href="{{ root }}/apps/{{ m.app }}">its app page</a> or delete the model and deploy it again with more.</div>
+{% else %}
+<div class="state-big" style="border-color:var(--ok)"><b>Ready.</b> The model answers on the gateway as <code>{{ m.name }}</code>.</div>
+{% endif %}
+
+<div class="row" style="margin:0 0 6px">
+  {% if chatbot %}<a href="{{ chatbot }}" target="_blank" rel="noopener"><button class="primary">Try it in the DataOS chatbot ↗</button></a>
+  <span class="muted" style="font-size:12px;align-self:center">Opens the chatbot with {{ m.name }} selected{% if m.phase != 'ready' %} (shown as starting until it is ready){% endif %}. You need access to the chatbot app.</span>
+  {% else %}<span class="muted" style="font-size:12px">The DataOS chatbot isn't deployed here (<code>dapp deploy -f examples/chatbot/dapp.yaml</code>); once it is, it lists every model you deploy and this button opens it.</span>{% endif %}
+</div>
+
+{% if created %}
+<div class="flash">Your dapp key. This is the only time it is shown, copy it now:
+<pre>export DAPP_KEY={{ created.key }}
+export DAPP_BASE_URL={{ base_url }}</pre>
+It is counted as <code>{{ created.app }}</code> in usage and works for LLM calls only. Revoke or replace it with <code>dapp llm-key personal --rotate</code>.</div>
+{% endif %}
+
+<h2>Use it</h2>
+<div class="panel">
+  <p style="margin-top:0">Model name <code>{{ m.name }}</code> on the gateway's endpoint <code>{{ base_url }}</code>. You need a dapp key:</p>
+  <form method="post" action="{{ root }}/models/{{ m.name }}/key" class="row" style="margin-bottom:14px">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <button class="primary">Create a dapp key for me</button>
+    <span class="muted" style="font-size:12px">A personal key, shown once. Apps get their own with <code>llm: true</code> in dapp.yaml.</span>
+  </form>
+  <h3 style="margin:0 0 6px">curl</h3>
+<pre>curl -s {{ base_url }}/chat/completions \
+  -H "Authorization: Bearer $DAPP_KEY" -H "Content-Type: application/json" \
+  -d '{"model": "{{ m.name }}", "messages": [{"role": "user", "content": "Say hello in one line."}]}'</pre>
+  <h3 style="margin:12px 0 6px">streaming</h3>
+<pre>curl -sN {{ base_url }}/chat/completions \
+  -H "Authorization: Bearer $DAPP_KEY" -H "Content-Type: application/json" \
+  -d '{"model": "{{ m.name }}", "stream": true, "messages": [{"role": "user", "content": "Count to five."}]}'</pre>
+  <h3 style="margin:12px 0 6px">Python (OpenAI SDK)</h3>
+<pre>import os
+from openai import OpenAI
+client = OpenAI(base_url="{{ base_url }}", api_key=os.environ["DAPP_KEY"])     # your dapp key (the gateway's, not OpenAI's)
+r = client.chat.completions.create(model="{{ m.name }}", messages=[{"role": "user", "content": "hi"}])
+print(r.choices[0].message.content)</pre>
+  <h3 style="margin:12px 0 6px">From a dapp app</h3>
+<pre># dapp.yaml:  llm: true
+client = OpenAI(api_key=os.environ["DAPP_LLM_KEY"])       # base URL is OPENAI_BASE_URL, set by dapp
+client.chat.completions.create(model="{{ m.name }}", messages=[...])</pre>
+  <p class="muted" style="margin:10px 0 0;font-size:12px">Anyone with a gateway key in this tenant can call it. Small models don't do tool calling, so give them plain text.</p>
+</div>
+
+{% if est %}
+<h2>Running cost <span class="muted" style="font-weight:400;font-size:12px">· an estimate</span></h2>
+<div class="panel">
+  <div class="kpis" style="margin-bottom:8px">
+    <div class="kpi"><div class="label">Per day, always on</div><div class="value">{{ est.day|money }}</div></div>
+    <div class="kpi"><div class="label">Per month</div><div class="value">{{ est.month|money }}</div></div>
+    <div class="kpi"><div class="label">At most (full limits)</div><div class="value">{{ est.day_max|money }}<span style="font-size:12px;font-weight:400">/day</span></div></div>
+  </div>
+  <p class="muted" style="margin:0;font-size:12px">From what the pod reserves ({{ req.cpu }} CPU, {{ req.memory }} memory{% if est.disk_month %}, disk {{ est.disk_month|money }}/month{% endif %}) at {{ rates.currency }}{{ rates.cpu_hour }} per CPU-hour and
+    {{ rates.currency }}{{ rates.gb_hour }} per GB-hour. DataOS doesn't bill these apps here. An idle model costs the same, so delete it when you're done.</p>
+</div>
+{% endif %}
+
+<div class="row" style="justify-content:space-between;align-items:end;margin-top:28px">
+  <h2 style="margin:0">Usage by app</h2>
+  <span class="muted">last
+    {% for d, label in [(1,'24h'),(7,'7 days'),(30,'30 days'),(90,'90 days')] %}<a href="?days={{ d }}"
+      style="{{ 'font-weight:600;color:var(--ink)' if d == days }}">{{ label }}</a>{{ ' · ' if not loop.last }}{% endfor %}</span>
+</div>
+<div class="panel" style="margin-top:10px">
+{% if usage and usage.error %}<div class="muted">Gateway not reachable: {{ usage.error }}</div>
+{% elif usage and usage.rows %}
+<table><thead><tr><th>App or key</th><th class="num">Requests</th><th class="num">Input tokens</th><th class="num">Output tokens</th><th class="num">Errors</th></tr></thead><tbody>
+{% for r in usage.rows|sort(attribute='requests', reverse=True) %}
+<tr><td>{{ r.app }}</td><td class="num">{{ r.requests|num }}</td><td class="num">{{ r.input_tokens|num }}</td><td class="num">{{ r.output_tokens|num }}</td><td class="num">{{ r.errors|num }}</td></tr>
+{% endfor %}
+</tbody></table>
+<p class="muted" style="margin:10px 0 0;font-size:12px">You see the calls made with your own keys and apps. Prompts are never stored, only token counts.</p>
+{% else %}<div class="empty">No calls in this period.</div>{% endif %}
+</div>
+
+{% if st %}
+<h2>Deployment</h2>
+<div class="panel"><table>
+  <tr><th>App</th><td><a href="{{ root }}/apps/{{ m.app }}">{{ m.app }}</a> <span class="muted">(logs, scaling and resources are on its app page)</span></td></tr>
+  <tr><th>Compute</th><td>{{ (st.spec or {}).compute }}</td></tr>
+  <tr><th>CPU</th><td>{{ req.cpu }} reserved, up to {{ lim.cpu }}</td></tr>
+  <tr><th>Memory</th><td>{{ req.memory }} reserved, up to {{ lim.memory }}</td></tr>
+  <tr><th>Volume</th><td>{% for v in svc.volumes or [] %}<code>{{ v.id }}</code> at <code>{{ v.directory }}</code>{% endfor %}</td></tr>
+  <tr><th>Server settings</th><td>{% for k, v in (svc.envs or {}).items()|sort %}{% if k.startswith('LLAMA_ARG_') %}<code>{{ k[10:]|lower }}={{ v|replace('"', '') }}</code> {% endif %}{% endfor %}</td></tr>
+</table></div>
+{% endif %}
+
+{% if m.source != 'config' and m.mine %}
+<h2>Delete</h2>
+<div class="panel">
+  <p style="margin-top:0" class="muted">Removes the model from the gateway, deletes its app and key, and then its Volume (the downloaded model). Calls to <code>{{ m.name }}</code> stop working, and it disappears from the chatbot's drop-down.</p>
+  <form class="row" method="post" action="{{ root }}/models/{{ m.name }}/delete" onsubmit="return confirm('Delete {{ m.name }}? Calls to it stop working.')">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <label><span>Type <code>{{ m.name }}</code> to confirm</span><input name="confirm" size="24" autocomplete="off"></label>
+    <button class="danger">Delete model</button>
+  </form>
+</div>
+{% elif m.source == 'config' %}
+<p class="muted" style="margin-top:16px;font-size:12px">This model comes from the gateway's own configuration (<code>DAPP_LOCAL_MODELS</code>), so it is changed where it was deployed: <a href="{{ root }}/apps/{{ m.app }}">{{ m.app }}</a>.</p>
+{% endif %}
+
+{% if m.phase == 'starting' and not created %}<script>setTimeout(function () { location.reload(); }, 10000);</script>{% endif %}
+{% endblock %}

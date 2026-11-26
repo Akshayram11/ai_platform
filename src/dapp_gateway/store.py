@@ -94,6 +94,23 @@ class Tool(Base):
     updated: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class LocalModel(Base):
+    """A model served by a DataOS app (llama.cpp) that people deployed from the dashboard. Callers ask for it by `name` on
+    /openai/v1/chat/completions; the gateway sends the call to `url` with the model server's own key (encrypted here)."""
+    __tablename__ = "local_models"
+    __table_args__ = (UniqueConstraint("tenant", "name"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(64), index=True)
+    owner: Mapped[str] = mapped_column(String(128), index=True)
+    app: Mapped[str] = mapped_column(String(64))
+    url: Mapped[str] = mapped_column(String(512))
+    key_secret: Mapped[str] = mapped_column(Text, default="")        # the model server's key, encrypted
+    repo: Mapped[str] = mapped_column(String(256), default="")       # e.g. Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M
+    description: Mapped[str] = mapped_column(String(512), default="")
+    created: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class ToolCall(Base):
     __tablename__ = "tool_calls"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -271,6 +288,39 @@ class Store:
             for t in rows:
                 s.expunge(t)
             return rows
+
+    # ---- local models (served by DataOS apps)
+    def save_model(self, *, tenant: str, name: str, owner: str, app: str, url: str, key_secret: str, repo: str,
+                   description: str) -> LocalModel:
+        with Session(self.engine) as s, s.begin():
+            m = LocalModel(tenant=tenant, name=name, owner=owner, app=app, url=url, key_secret=key_secret, repo=repo,
+                           description=description)
+            s.add(m)
+            s.flush()
+            s.expunge(m)
+            return m
+
+    def get_model(self, tenant: str, name: str) -> LocalModel | None:
+        with Session(self.engine) as s:
+            m = s.execute(select(LocalModel).where(LocalModel.tenant == tenant, LocalModel.name == name)
+                          ).scalar_one_or_none()
+            if m is not None:
+                s.expunge(m)
+            return m
+
+    def list_models(self, tenant: str | None = None) -> list[LocalModel]:
+        with Session(self.engine) as s:
+            q = select(LocalModel).order_by(LocalModel.tenant, LocalModel.name)
+            if tenant:
+                q = q.where(LocalModel.tenant == tenant)
+            rows = list(s.execute(q).scalars())
+            for m in rows:
+                s.expunge(m)
+            return rows
+
+    def delete_model(self, tenant: str, name: str) -> int:
+        with Session(self.engine) as s, s.begin():
+            return s.execute(delete(LocalModel).where(LocalModel.tenant == tenant, LocalModel.name == name)).rowcount or 0
 
     def record_tool_call(self, **row) -> None:
         with Session(self.engine) as s, s.begin():

@@ -4,6 +4,22 @@
 `app/` and `dapp.yaml` in `~/work`, deploys with `dapp deploy` (see [run-from-source.md](run-from-source.md)), checks the app, and
 gives you the URL. URL: `https://poliks.instance.dataos.cloud/claude-code/`.
 
+## Everyone deploys their own (dashboard → Claude Code)
+The **Claude Code** tab deploys a personal instance in one click, like the Models tab: `claude-<your id>`, private to you, running as you. Optional
+**Customize** (compute, CPU and memory request/limit, defaults 250m/2 CPU and 1Gi/2Gi) with a live cost estimate (about $0.3/day reserved; DataOS doesn't bill these
+apps, so it is a comparison), and an optional **Claude token** field. The page then shows its state (starting → running), **Open Claude Code**, whether you are
+signed in to Claude, and:
+- **Stop (keep my files):** deletes only the app, so the pod stops costing. Your code and conversations stay in your Storage (`workspace`, `claude-sessions`) and the
+  stored token stays; **Deploy** again restores them.
+- **Stay signed in:** paste the output of `claude setup-token` once. It becomes the DataOS secret `dapp-claude-<you>-anthropic` (only your instance reads it, never
+  shown again; saving restarts a running instance).
+- **Everyone's Claude Code:** a table of who has one and in what state (what DataOS lets you list); only the owner can open one.
+- **Delete:** the app and its secrets (token, sign-in); the workspace in Storage stays until you delete it there.
+
+Why one per person and not one shared app: the pod runs as one DataOS user and everyone in a shell shares its Linux user, so a shared instance would deploy with the
+owner's rights and let people read each other's files and Claude login. The cost of that isolation is the idle reservation, which **Stop** removes.
+Two instances of the same person (this tab's and an older hand-deployed `claude-code`) would sync the same workspace object: keep one.
+
 ## Who can open it, and as whom
 Private (DataOS sign-in), and `dapp_proxy` additionally lets only the **owner** through. The terminal acts with the owner's
 DataOS identity (DataOS gives the pod `DATAOS_RUN_AS_USER` / `DATAOS_RUN_AS_APIKEY`), so everything it deploys is yours and
@@ -35,6 +51,14 @@ claude-code replaces the pod, so you are asked to sign in again. Fix it once wit
 `apiKeyHelper`, so `env` does not show it). A token is visible in the terminal's environment to anything running there: do not run untrusted code in it.
 Never paste a token in chat or commit it. To replace it, run `claude setup-token` again and repeat step 2.
 
+## What the agent knows (CLAUDE.md)
+`apps/claude-code/CLAUDE.md` is copied to `~/work` on every start and is what the online Claude follows. It opens with **recipes**: a **low-cost chatbot**
+(pick a model from `dapp model catalog`, `dapp model deploy qwen2.5-0.5b --name small`, `dapp init NAME --template chatbot --model small`, `dapp deploy`, check the
+302, report URL, model and estimated cost), **chat over data products** (the Data Product MCP tool names and the flow for a model that can't call tools), and a
+custom app. Then the reference: apps from source, OpenAI and in-DataOS models, immortal-obj, sharing and access requests, commands, how to finish. A test
+(`tests/test_cli_model.py`) checks that every `dapp ...` command in it exists, so the guide can't drift from the CLI. It only matches the CLI of the image it ships in:
+rebuild the image after changing either.
+
 ## Resources
 `resources: {cpu: 500m, memory: 2Gi, cpuLimit: "4", memoryLimit: 4Gi}`. Real use is far lower (peak ~340 MiB, 0.1 core over a day);
 the extra room is for installs and several tabs. Resources do not cause logouts.
@@ -50,5 +74,7 @@ and on SIGTERM; a save only starts after a successful restore, so a failed resto
 - **`[workspace-sync] could not save …` in `dapp logs claude-code`:** the gateway or immortal-obj was not reachable at that moment (timeout or
   connection refused). It retries every 30 s; a save that never succeeds means `~/work` is only in the pod.
 - **`claude-sessions: 0 files` after a restart:** nothing had been saved from the earlier pod.
-- **Build:** `docker buildx build --platform linux/amd64 -f apps/claude-code/Dockerfile -t docker.io/tmdcio/dapp-claude-code:0.1.4 --push .`
+- **Deploy from the pod fails with `owner is required`:** the pod writes through the REST API (no `dataos-ctl`). The API writer sets the owner and encodes secret
+  values since claude-code 0.1.5; on an older image, rebuild. Test the pod's path from the laptop with `DAPP_WRITER=api uv run dapp deploy -f dapp.yaml`.
+- **Build:** `docker buildx build --platform linux/amd64 -f apps/claude-code/Dockerfile -t docker.io/tmdcio/dapp-claude-code:0.1.5 --push .`
   then bump the tag in `dapp.yaml` and `src/dapp/cli.py` (`CLAUDE_CODE_IMAGE`).

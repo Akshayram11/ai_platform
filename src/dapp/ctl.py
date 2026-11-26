@@ -9,6 +9,7 @@ Set DAPP_WRITER=api to skip dataos-ctl and call Poros directly (used inside the 
 
 from __future__ import annotations
 
+import base64
 import os
 import shutil
 import subprocess
@@ -105,6 +106,15 @@ class CtlWriter:
         return with_conflict_retry(lambda: self._run(args))
 
 
+def _encode_secret_values(m: dict[str, Any]) -> dict[str, Any]:
+    """dataos-ctl base64-encodes a key-value secret's values before sending; the REST API takes them as base64Value, so
+    plain text (a token, or our own base64 code pieces) would be stored wrongly or refused. Do what ctl does."""
+    if m.get("type") != "secret" or not isinstance((m.get("spec") or {}).get("data"), dict):
+        return m
+    data = {k: base64.b64encode(str(v).encode()).decode() for k, v in m["spec"]["data"].items()}
+    return {**m, "spec": {**m["spec"], "data": data}}
+
+
 @dataclass
 class ApiWriter:
     client: DataOS
@@ -115,6 +125,10 @@ class ApiWriter:
             return "lint skipped: the API writer has no lint mode (Poros validates on apply)"
         done = []
         for m in manifests:
+            # dataos-ctl fills in the owner (the signed-in user); the REST API refuses a resource without one
+            if not m.get("owner") and self.client.ctx.user_id:
+                m = {**m, "owner": self.client.ctx.user_id}
+            m = _encode_secret_values(m)
             with_conflict_retry(lambda m=m: self.client.apply(m))
             done.append(f"applied {m['type']}/{m['name']}")
         return "\n".join(done)

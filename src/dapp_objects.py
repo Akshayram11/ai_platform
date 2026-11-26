@@ -20,6 +20,10 @@ In dapp.yaml:  objects: true          (the app gets DAPP_OBJECTS_URL and its gat
 
 Objects belong to the app (app:<name>); other apps and people see them only if the app shares them. Standard
 library only, so it also works outside the runtime image.
+
+DataOS sometimes moves the gateway to another node; it is unreachable for about a minute (connection refused, 502/503/504).
+A call that never reached the server is retried with a short back-off for up to DAPP_OBJECTS_RETRY_SECONDS (default 45), so
+the app waits out the move instead of failing. A call that was sent and then timed out is not retried: it may have been done.
 """
 
 from __future__ import annotations
@@ -29,12 +33,15 @@ import hashlib
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 PROTOCOL = "2025-06-18"
+RETRY_SECONDS = float(os.environ.get("DAPP_OBJECTS_RETRY_SECONDS", "45"))
+RETRY_HTTP = (502, 503, 504)       # what the ingress or gateway answers while the service behind it is away
 MAX_FILE = 700_000
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".cache", ".mypy_cache", ".pytest_cache",
              ".ruff_cache", ".npm", ".local"}
@@ -46,12 +53,31 @@ class ObjectsError(RuntimeError):
 
 
 class Client:
-    def __init__(self, url: str | None = None, key: str | None = None, *, timeout: float = 30, opener=None):
+    def __init__(self, url: str | None = None, key: str | None = None, *, timeout: float = 30, opener=None,
+                 retry_seconds: float | None = None, sleep=time.sleep):
         self.url = url or os.environ.get("DAPP_OBJECTS_URL", "")
         self.key = key or os.environ.get("DAPP_LLM_KEY", "")
         self.timeout = timeout
         self._open = opener or urllib.request.urlopen
+        self.retry_seconds = RETRY_SECONDS if retry_seconds is None else retry_seconds
+        self._sleep = sleep
         self._id = 0
+
+    def _send(self, req) -> str:
+        """The reply body. Retries only when the request did not reach a working server."""
+        deadline, delay = time.monotonic() + self.retry_seconds, 1.0
+        while True:
+            try:
+                with self._open(req, timeout=self.timeout) as r:
+                    return r.read().decode()
+            except urllib.error.HTTPError as e:
+                if e.code not in RETRY_HTTP or time.monotonic() + delay >= deadline:
+                    raise ObjectsError(f"immortal-obj: HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from e
+            except urllib.error.URLError:           # refused, no route, connect timeout: nothing was sent
+                if time.monotonic() + delay >= deadline:
+                    raise
+            self._sleep(delay)
+            delay = min(delay + 1.0, 5.0)
 
     def call(self, tool: str, args: dict, *, end_user: str | None = None) -> Any:
         if not self.url or not self.key:
@@ -65,11 +91,7 @@ class Client:
         if end_user:
             headers["x-dapp-user"] = end_user
         req = urllib.request.Request(self.url, data=body, headers=headers, method="POST")
-        try:
-            with self._open(req, timeout=self.timeout) as r:
-                raw = r.read().decode()
-        except urllib.error.HTTPError as e:
-            raise ObjectsError(f"immortal-obj: HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from e
+        raw = self._send(req)
         msg = json.loads(_first_event(raw))
         if "error" in msg:
             raise ObjectsError(f"immortal-obj: {msg['error'].get('message')}")

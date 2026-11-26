@@ -7,11 +7,13 @@ every call it makes runs as that person, so DataOS permissions decide what they 
 ## Pages
 | Page | What |
 |---|---|
-| **Apps** (home) | Your apps (or all in the tenant), status, owner, who can open each, CPU, memory, LLM tokens. KPI "Access requests" and a pill per app when people are waiting |
-| App → Overview | Status, replicas, CPU and memory now (with 24 h graphs), requests, LLM tokens, pods, deployment (image, port, compute, **volumes**, secrets). For an app that serves a model (llm-small): **"who used it"**, the apps that called model `small` |
+| **Apps** (home) | Your apps (or all in the tenant), status, owner, who can open each, CPU, memory, the **secrets** (names only, linked to the app's Secrets tab) and **Volumes** (id and mount, or a disk, or "none: files are lost on restart") each app uses, LLM tokens. KPI "Access requests" and a pill per app when people are waiting |
+| App → Overview | Status, replicas, CPU and memory now (with 24 h graphs), requests, LLM tokens, pods, deployment (image, port, compute, **volumes**, secrets). For an app that serves a model (llm-small, `model-…`): **"who used it"**, the apps that called it |
 | App → LLM usage | Gateway key (rotate, revoke), usage by user, by day and model |
 | App → Secrets, Access, Logs, Settings | Manage secrets, the allow list and requests, read logs, scale or delete |
 | **Storage** | immortal-obj as you (see below) |
+| **Models** | Deploy, use and delete small language models: [models.md](models.md) |
+| **Claude Code** | Deploy your own Claude Code in a click, stop and start it, store your Claude token: [claude-code.md](claude-code.md) |
 | Tools | MCP tools behind the gateway: who can use them, usage |
 | Keys | DataOS API keys and gateway keys |
 

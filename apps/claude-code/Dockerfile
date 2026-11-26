@@ -1,5 +1,5 @@
 # Claude Code in the browser, on DataOS: a web terminal (ttyd) behind DataOS sign-in (dapp_proxy), owner only.
-#   docker buildx build --platform linux/amd64 -f apps/claude-code/Dockerfile -t docker.io/tmdcio/dapp-claude-code:0.1.4 --push .
+#   docker buildx build --platform linux/amd64 -f apps/claude-code/Dockerfile -t docker.io/tmdcio/dapp-claude-code:0.1.7 --push .
 FROM node:22-bookworm-slim AS node
 
 FROM python:3.12-slim

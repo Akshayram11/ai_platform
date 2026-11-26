@@ -55,10 +55,19 @@ const listEl = document.getElementById('chats'), note = document.getElementById(
 let messages = [], chatId = null;
 const sel = document.getElementById('model');
 const SAVED = (() => { try { return localStorage.getItem('dapp-chat-model'); } catch { return null; } })();
-fetch('api/models').then(r => r.ok ? r.json() : null).then(m => { if (!m) return;
-  sel.innerHTML = m.models.map(x => `<option value="${x}">${x}${x === m.default ? '' : ' (in DataOS)'}</option>`).join('');
-  if (m.models.includes(SAVED)) sel.value = SAVED; }).catch(() => {});
-sel.addEventListener('change', () => { try { localStorage.setItem('dapp-chat-model', sel.value); } catch {} });
+let wanted = new URLSearchParams(location.search).get('model') || SAVED, touched = false;     // ?model=name opens the chat on that model
+function renderModels(m) {                                                    // runs every 10 s: a model you deploy shows up here
+  const keep = touched ? sel.value : (wanted || sel.value);
+  sel.replaceChildren(...m.models.map(x => {
+    const st = (m.status || {})[x] || {}, o = document.createElement('option');
+    o.value = x; o.textContent = x === m.default ? x : x + (st.ready === false ? ' (in DataOS, starting…)' : ' (in DataOS)');
+    return o;
+  }));
+  if (m.models.includes(keep)) sel.value = keep; else sel.value = m.default;
+}
+function loadModels() { fetch('api/models').then(r => r.ok ? r.json() : null).then(m => { if (m) renderModels(m); }).catch(() => {}); }
+loadModels(); setInterval(loadModels, 10000);
+sel.addEventListener('change', () => { touched = true; wanted = sel.value; try { localStorage.setItem('dapp-chat-model', sel.value); } catch {} });
 fetch('_dapp/me').then(r => r.ok ? r.json() : null).then(me => { if (me) document.getElementById('who').innerHTML =
   `${me.id} · <a href="_dapp/logout" style="color:inherit">sign out</a> · `; }).catch(() => {});
 

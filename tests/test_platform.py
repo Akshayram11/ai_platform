@@ -12,6 +12,12 @@ CTX = Context("t", "x.dataos.cloud", "ai", "alice", "key123", None)
 BASE = "/poros/api/v2/tenants/ai"
 
 
+
+def plain(data):
+    """Secret values as the API writer sends them (base64, like dataos-ctl) back to the text the app will see."""
+    import base64
+    return {k: base64.b64decode(v).decode() for k, v in data.items()}
+
 class FakePoros:
     def __init__(self):
         self.store: dict[tuple[str, str], dict] = {}
@@ -64,7 +70,7 @@ def test_deploy_list_status_scale_delete():
     assert fake.store[("app", "chatbot")]["spec"]["replicas"] == 3
 
     p.set_secret("chatbot", "openai", {"OPENAI_API_KEY": "sk-x"})
-    assert fake.store[("secret", "dapp-chatbot-openai")]["spec"]["data"] == {"OPENAI_API_KEY": "sk-x"}
+    assert plain(fake.store[("secret", "dapp-chatbot-openai")]["spec"]["data"]) == {"OPENAI_API_KEY": "sk-x"}
     assert {"id": "dapp-chatbot-openai"} in fake.store[("app", "chatbot")]["spec"]["service"]["secrets"]
 
     p.delete("chatbot")
@@ -112,7 +118,7 @@ def test_llm_secret_holds_only_the_dapp_key(monkeypatch):
                                    "command": ["x"], "public": True, "llm": True})
     p.deploy(spec)
     secret = fake.store[("secret", "dapp-bot-llm")]
-    assert secret["spec"]["data"] == {"DAPP_LLM_KEY": "dapp_x"}   # no OPENAI_API_KEY / ANTHROPIC_API_KEY copies
+    assert plain(secret["spec"]["data"]) == {"DAPP_LLM_KEY": "dapp_x"}   # no OPENAI_API_KEY / ANTHROPIC_API_KEY copies
     env = fake.store[("app", "bot")]["spec"]["service"]["envs"]
     assert env["OPENAI_BASE_URL"].endswith("/openai/v1") and "OPENAI_API_KEY" not in env
 
@@ -128,7 +134,7 @@ def test_secret_apply_fills_vars_and_refuses_unsafe_files(tmp_path):
                     "    # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}\n")
     p, fake = make()
     r = p.apply_secret_file(str(good), {"OPENAI_API_KEY": "sk-test"})
-    assert fake.store[("secret", "dapp-gw")]["spec"]["data"] == {"OPENAI_API_KEY": "sk-test"}
+    assert plain(fake.store[("secret", "dapp-gw")]["spec"]["data"]) == {"OPENAI_API_KEY": "sk-test"}
     assert r["secrets"] == [{"name": "dapp-gw", "tenant": "ai", "keys": ["OPENAI_API_KEY"]}] and "sk-test" not in str(r)
 
     with pytest.raises(PlatformError, match="unset or empty"):      # would have written "" over a working key
@@ -221,7 +227,7 @@ def test_llm_rotation_keeps_old_key_until_the_pod_rolls_over(monkeypatch):
     r = p.rotate_llm_key("bot")
     assert calls == [("issue", False), ("revoke", "dapp_OLD")]       # old key only revoked after the new pod is up
     assert r["rolled_over"] and r["revoked"] == ["dapp_OLD"] and r["new_key_prefix"] == "dapp_NEWKEYV"
-    assert fake.store[("secret", "dapp-bot-llm")]["spec"]["data"] == {"DAPP_LLM_KEY": "dapp_NEWKEYVALUE"}
+    assert plain(fake.store[("secret", "dapp-bot-llm")]["spec"]["data"]) == {"DAPP_LLM_KEY": "dapp_NEWKEYVALUE"}
 
 
 def test_llm_rotation_leaves_old_keys_if_the_app_never_restarts(monkeypatch):
@@ -327,3 +333,15 @@ def test_removing_access_never_needs_the_user_to_exist():
     fake.store[("app", "chatbot")]["spec"]["service"]["envs"]["DAPP_ALLOWED_USERS"] += ",left-company"
     r = p.deny("chatbot", ["left-company", "carolktmdcio"])   # someone deleted from DataOS can still be removed
     assert r["users"] == ["alice"]
+
+
+def test_the_app_list_names_the_secrets_and_volumes_each_app_uses():
+    p, fake = make()
+    fake.store[("app", "bot")] = {"name": "bot", "type": "app", "owner": "alice", "tenant": "ai", "tags": ["dapp"], "spec": {"service": {
+        "secrets": [{"id": "ai:dapp-bot-llm"}, {"id": "dapp-bot-oidc"}], "volumes": [{"id": "bot-data", "directory": "/data", "readOnly": False}]}}}
+    fake.store[("app", "plain")] = {"name": "plain", "type": "app", "owner": "alice", "tenant": "ai", "tags": [], "spec": {"service": {
+        "disk": {"size": "2Gi", "mountPath": "/d"}}}}
+    rows = {a["name"]: a for a in p.list_apps(with_access=True)}
+    assert rows["bot"]["secrets"] == ["dapp-bot-llm", "dapp-bot-oidc"]                          # names only, tenant prefix dropped
+    assert rows["bot"]["volumes"] == [{"id": "bot-data", "directory": "/data", "readOnly": False}] and rows["bot"]["disk"] is None
+    assert rows["plain"]["secrets"] == [] and rows["plain"]["volumes"] == [] and rows["plain"]["disk"] == "2Gi"

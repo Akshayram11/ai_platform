@@ -14,9 +14,19 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .claude import (
+    TOKEN_KEY,
+    ClaudeDeploy,
+    claude_app_spec,
+    clean_token,
+    instance_name,
+    is_claude_instance,
+    token_secret,
+)
 from .client import DataOS, DataOSError
 from .config import Context, current_context_name
 from .ctl import ApiWriter, Writer, make_writer
+from .models import MAX_MODELS_PER_PERSON, ModelDeploy, model_app_spec, render_volume
 from .pack import Packed, pack
 from .spec import (
     ALLOWED_ROLES_ENV,
@@ -67,6 +77,15 @@ ID_RE = re.compile(r"^[A-Za-z0-9_.@*:-]+$")
 def split_ids(csv: str) -> list[str]:
     """User/role ids from a comma list. Anything that isn't a plausible id is dropped, never carried forward."""
     return [i for i in (p.strip() for p in csv.split(",")) if ID_RE.match(i)]
+
+
+def uses(a: dict[str, Any]) -> dict[str, Any]:
+    """The DataOS secrets and Volumes an app mounts (names only: a secret's values are never read)."""
+    svc = ((a.get("spec") or {}).get("service")) or {}
+    return {"secrets": [str(x.get("id", "")).split(":")[-1] for x in svc.get("secrets") or [] if x.get("id")],
+            "volumes": [{"id": v.get("id"), "directory": v.get("directory"), "readOnly": bool(v.get("readOnly"))}
+                        for v in svc.get("volumes") or [] if v.get("id")],
+            "disk": ((svc.get("disk") or {}).get("size") if svc.get("disk") else None)}
 
 
 def access_summary(a: dict[str, Any]) -> dict[str, Any]:
@@ -158,7 +177,7 @@ class Platform:
             "created": a.get("createdAt"),
             "managed_by_dapp": DAPP_TAG in tags,
             "url": self.app_url(a),
-            **({"access": access_summary(a)} if "spec" in a else {}),
+            **({"access": access_summary(a), **uses(a)} if "spec" in a else {}),
         }
 
     def app_url(self, a: dict[str, Any]) -> str | None:
@@ -277,6 +296,137 @@ class Platform:
             "output": output,
         }
 
+    # ---------- Claude Code: one terminal per person, deployed from the dashboard ----------
+    def claude_instance(self) -> dict[str, Any]:
+        """Your Claude Code: its app name and URL, whether it is deployed (and its state), and whether a Claude token is stored."""
+        app = instance_name(self.ctx.user_id or "")
+        live = self.client.get_resource("app", app)
+        state = None
+        if live is not None:
+            try:
+                state = self.status(app)["state"]
+            except (PlatformError, DataOSError, KeyError):
+                state = "unknown"
+        return {"app": app, "exists": live is not None, "state": state, "url": f"{self.ctx.base_url}/{app}/",
+                "token": self.client.get_resource("secret", token_secret(app)) is not None}
+
+    def claude_instances(self) -> list[dict[str, Any]]:
+        """Every Claude Code in the tenant that DataOS lets you list: who has one and in what state."""
+        return [a for a in self.list_apps(everyone=True) if is_claude_instance(a)]
+
+    def deploy_claude(self, d: ClaudeDeploy, *, compute: str, token: str = "") -> dict[str, Any]:
+        """Deploy (or start again) your own Claude Code. The token, if given, becomes a DataOS secret only this app reads."""
+        d.check()
+        token = clean_token(token)
+        me = self.ctx.user_id or ""
+        app = instance_name(me)
+        if self.client.get_resource("app", app) is not None:
+            raise PlatformError(f"your Claude Code ({app}) is already deployed")
+        if token:
+            self._write(render_secret(token_secret(app), tenant=self.ctx.tenant, app=app, data={TOKEN_KEY: token},
+                                      description=f"Claude token of {me} for {app}"))
+        with_token = bool(token) or self.client.get_resource("secret", token_secret(app)) is not None
+        done = self.deploy(claude_app_spec(app, me, d, compute=compute, fqdn=self.ctx.fqdn, with_token=with_token))
+        return {"app": app, "url": done["url"], "token": with_token, "notes": done["notes"]}
+
+    def set_claude_token(self, token: str) -> dict[str, Any]:
+        """Store (or replace) your Claude token and attach it to your running Claude Code, which restarts to use it."""
+        token = clean_token(token)
+        if not token:
+            raise PlatformError("paste the token that `claude setup-token` prints")
+        app = instance_name(self.ctx.user_id or "")
+        if self.client.get_resource("app", app) is None:
+            self._write(render_secret(token_secret(app), tenant=self.ctx.tenant, app=app, data={TOKEN_KEY: token},
+                                      description=f"Claude token of {self.ctx.user_id} for {app}"))
+            return {"app": app, "attached": False}
+        return {**self.set_secret(app, "anthropic", {TOKEN_KEY: token}, attach=True), "attached": True}
+
+    def stop_claude(self) -> dict[str, Any]:
+        """Remove the pod (and its cost). Files, conversations and the token stay; deploying again brings them back."""
+        app = instance_name(self.ctx.user_id or "")
+        return {"app": app, "output": self._delete_app(app)}
+
+    def delete_claude(self) -> dict[str, Any]:
+        """Stop it and delete its secrets too (the token and the sign-in). Your files stay in your immortal-obj objects."""
+        app = instance_name(self.ctx.user_id or "")
+        return self.delete(app, purge=True)
+
+    # ---------- models (llama.cpp servers deployed from the dashboard) ----------
+    def models(self) -> list[dict[str, Any]]:
+        """Models callers in this tenant can use: the gateway's own and the ones people deployed."""
+        return self._gateway().list_models(self.ctx.tenant)
+
+    def deploy_model(self, d: ModelDeploy, *, compute: str, dataplane: str) -> dict[str, Any]:
+        """Volume for the model file, a key for its server, the private app, and its name in the gateway. If a step fails the
+        earlier ones are removed again, so a failed deploy leaves nothing behind."""
+        d.check()
+        tenant, gw = self.ctx.tenant, self._gateway()
+        known = gw.list_models(tenant)
+        if any(m["name"] == d.name for m in known):
+            raise PlatformError(f"a model called {d.name} already exists")
+        mine = [m for m in known if m.get("source") == "dashboard" and m.get("owner") == self.ctx.user_id]
+        if len(mine) >= MAX_MODELS_PER_PERSON:
+            raise PlatformError(f"you already run {len(mine)} models; delete one first (the limit is {MAX_MODELS_PER_PERSON})")
+        if self.client.get_resource("app", d.app) is not None:
+            raise PlatformError(f"an app called {d.app} already exists")
+        made: list[tuple[str, str]] = []
+        try:
+            self._write(render_volume(d, tenant=tenant, dataplane=dataplane))
+            made.append(("volume", d.volume))
+            token = pysecrets.token_urlsafe(32)
+            self._write(render_secret(d.secret, tenant=tenant, app=d.app, data={"LLAMA_API_KEY": token},
+                                      description=f"API key of the model server {d.app}"))
+            made.append(("secret", d.secret))
+            self._wait_for("volume", d.volume)
+            deployed = self.deploy(model_app_spec(d, compute=compute))
+            made.append(("app", d.app))
+            gw.register_model({"tenant": tenant, "name": d.name, "app": d.app, "url": f"http://{d.app}:8080", "key": token,
+                               "repo": d.source, "description": f"{d.source} on CPU via llama.cpp"})
+        except Exception:
+            for kind, name in reversed(made):
+                try:
+                    self.writer.delete(kind, name)
+                except Exception as e:  # best effort: the first error is the one to show
+                    log.warning("could not remove %s %s after a failed model deploy: %s", kind, name, e)
+            raise
+        return {"name": d.name, "app": d.app, "volume": d.volume, "secret": d.secret, "source": d.source,
+                "url": deployed["url"], "notes": deployed["notes"]}
+
+    def delete_model(self, name: str) -> dict[str, Any]:
+        """Stop routing to it, delete its app and secrets. The Volume goes when its pod has stopped (delete_model_volume)."""
+        tenant, gw = self.ctx.tenant, self._gateway()
+        m = next((m for m in gw.list_models(tenant) if m["name"] == name), None)
+        if m is None:
+            raise PlatformError(f"no model {name} in {tenant}")
+        if m.get("source") != "dashboard":
+            raise PlatformError(f"{name} comes from the gateway's own configuration; remove it where it was deployed")
+        gw.unregister_model(tenant, name)                      # the gateway checks that you own it
+        app = m["app"]
+        out = self.delete(app, purge=True)
+        return {"name": name, "app": app, "volume": f"{app}-data"[:60].rstrip("-"), "output": out["output"]}
+
+    def delete_model_volume(self, volume: str, *, timeout: float = 240, every: float = 10) -> bool:
+        """Delete a model's Volume once nothing mounts it any more (DataOS refuses while the pod is still stopping)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                self.writer.delete("volume", volume)
+                if self.client.get_resource("volume", volume) is None:
+                    return True
+            except Exception as e:
+                log.info("volume %s not deleted yet: %s", volume, e)
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(every)
+
+    def _wait_for(self, kind: str, name: str, *, timeout: float = 60, every: float = 2) -> None:
+        """Poros creates some resources a moment after the apply returns; an app that mounts a Volume needs it to exist."""
+        deadline = time.monotonic() + timeout
+        while self.client.get_resource(kind, name) is None:
+            if time.monotonic() >= deadline:
+                raise PlatformError(f"{kind} {name} did not appear in {int(timeout)} s")
+            time.sleep(every)
+
     def scale(self, name: str, replicas: int) -> dict[str, Any]:
         if replicas < 1:
             raise PlatformError("replicas must be >= 1 (use `dapp rm` to remove an app)")
@@ -284,8 +434,29 @@ class Platform:
         app["spec"]["replicas"] = replicas
         return {"app": name, "replicas": replicas, "output": self._write(app)}
 
+    def _delete_app(self, name: str, *, patience: float = 75, every: float = 5) -> str:
+        """Delete an app. DataOS grants its creator the right to delete it a short while after creating it, so a delete right after a
+        deploy can get a 403 that goes away by itself; for a young app wait for it instead of telling the person they have no permission."""
+        from datetime import UTC, datetime
+
+        deadline = time.monotonic() + patience
+        while True:
+            try:
+                return self.writer.delete("app", name)
+            except DataOSError as e:
+                if e.status != 403 or time.monotonic() >= deadline:
+                    raise
+                made = ((self.client.get_resource("app", name) or {}).get("createdAt") or "")
+                try:
+                    age = (datetime.now(UTC) - datetime.fromisoformat(made)).total_seconds()
+                except ValueError:
+                    raise e from None
+                if age > 300:                      # not a new app: this really is a missing permission
+                    raise
+                time.sleep(every)
+
     def delete(self, name: str, *, purge: bool = False) -> dict[str, Any]:
-        out = [self.writer.delete("app", name)]
+        out = [self._delete_app(name)]
         if purge:
             for s in self.list_secrets(name):
                 out.append(self.writer.delete("secret", s["name"]))

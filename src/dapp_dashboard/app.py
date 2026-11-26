@@ -31,11 +31,31 @@ from typing import Any
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 
 from dapp.auth import Heimdall, IdentityUnavailable, token_from_headers
+from dapp.claude import DEFAULTS as CLAUDE_DEFAULTS
+from dapp.claude import ClaudeDeploy, instance_name
 from dapp.client import DataOS, DataOSError
 from dapp.config import Context, load_context
 from dapp.ctl import ApiWriter
+from dapp.models import (
+    CATALOG,
+    TOKENS_PER_GB_S,
+    ModelDeploy,
+    catalog_entry,
+    defaults,
+    defaults_for,
+    estimate,
+    explain_defaults,
+    hf_quants,
+    quality_of,
+    rates,
+    speed_of,
+    tier_of,
+    traits_of,
+    with_hf_facts,
+)
 from dapp.platform import ID_RE, Platform, PlatformError, gateway_internal_url, gateway_public_url
 from dapp.usage import GatewayError, GatewayUsage, Prometheus, observability_url, service_of
 from dapp_login import SCOPES, Login, Settings
@@ -104,6 +124,15 @@ def fmt_when(value: str | None) -> str:
         return str(value)
 
 
+def fmt_money(v: float | None) -> str:
+    """An estimate, not a bill: cents for small amounts, whole numbers for big ones."""
+    if v is None:
+        return "–"
+    cur = rates()["currency"]
+    return f"<{cur}0.01" if v < 0.01 else (f"{cur}{v:.2f}" if v < 10 else f"{cur}{v:,.0f}")
+
+
+TEMPLATES.env.filters["money"] = fmt_money
 TEMPLATES.env.filters["num"] = fmt_num
 TEMPLATES.env.filters["when"] = fmt_when
 
@@ -882,6 +911,298 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         except (DataOSError, PlatformError, ValueError, ObjectsError, OSError) as e:
             return back(request, dest, err=str(e))
         return back(request, dest, msg=f"Declined the request from {who}.")
+
+    # ------------------------------------------------------------------ models
+    # Small language models deployed on DataOS CPUs (llama.cpp), private, reached through the gateway by name.
+    models_compute = os.environ.get("DAPP_MODELS_COMPUTE", "engineering-compute")
+    models_dataplane = os.environ.get("DAPP_MODELS_DATAPLANE", "poldp01")
+
+    def deploy_form(entry, hf: str = "", quants: dict[str, float] | None = None) -> dict[str, Any]:
+        """The values the Deploy form starts with: the sizes that fit this model, and llama.cpp's own defaults."""
+        base = defaults_for(entry) if entry else defaults(1.0)
+        sampling = {k: "" for k in ("temperature", "top_k", "top_p", "min_p", "repeat_penalty")}
+        return {**sampling, **base, "name": entry.id if entry else "", "model_id": entry.id if entry else "custom", "hf": hf,
+                "quant": entry.quant if entry else "", "compute": models_compute, "batch": 2048, "ubatch": 512,
+                "flash_attn": "auto", "cache_type_k": "f16", "cache_type_v": "f16", "max_tokens": -1, "reasoning": "auto",
+                "jinja": "on", "context_shift": "off", "cont_batching": "on", "timeout_s": 3600}
+
+    def parse_deploy(form) -> ModelDeploy:
+        """Form text to a ModelDeploy: empty optional boxes stay unset, and a mistake becomes one readable sentence."""
+        def num(key, cast=int):
+            raw = str(form.get(key, "")).strip()
+            if raw == "":
+                return None
+            try:
+                return cast(raw)
+            except ValueError:
+                raise ValueError(f"{key.replace('_', ' ')}: {raw!r} is not a number")
+        model_id = str(form.get("model_id", "")).strip()
+        fields: dict[str, Any] = {"name": str(form.get("name", "")), "model_id": "" if model_id == "custom" else model_id,
+                                  "hf": str(form.get("hf", "")), "quant": str(form.get("quant", "")).strip(),
+                                  "compute": str(form.get("compute", "")).strip()}
+        for key in ("cpu", "cpu_limit", "memory", "memory_limit", "flash_attn", "cache_type_k", "cache_type_v", "reasoning",
+                    "jinja", "context_shift", "cont_batching"):
+            if str(form.get(key, "")).strip():
+                fields[key] = str(form[key]).strip()
+        for key in ("disk_gi", "ctx", "parallel", "threads", "batch", "ubatch", "max_tokens", "timeout_s", "top_k"):
+            v = num(key)
+            if v is not None:
+                fields[key] = v
+        for key in ("temperature", "top_p", "min_p", "repeat_penalty"):
+            v = num(key, float)
+            if v is not None:
+                fields[key] = v
+        try:
+            d = ModelDeploy(**fields)
+        except ValidationError as e:
+            raise ValueError("; ".join(f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors())) from e
+        return with_hf_facts(d).check()
+
+    def card(entry) -> dict[str, Any]:
+        """One catalog entry as the picker shows it: what it is good at, how fast, what it needs and what it costs."""
+        d = defaults_for(entry)
+        stars, word = speed_of(entry.size_gb)
+        est = estimate(cpu=d["cpu"], cpu_limit=d["cpu_limit"], memory=d["memory"], memory_limit=d["memory_limit"],
+                       disk_gi=d["disk_gi"], size_gb=entry.size_gb)
+        return {"e": entry, "quality": quality_of(entry), "traits": traits_of(entry), "tier": tier_of(entry), "speed": stars,
+                "speed_word": word, "cpu": d["cpu_limit"], "memory": d["memory_limit"], "ctx": d["ctx"], "est": est}
+
+    def disk_of(p: Platform, app: str) -> float | None:
+        """The model's Volume size in Gi, for its cost (None when it can't be read)."""
+        vol = _safe(lambda: p.client.get_resource("volume", f"{app}-data"[:60].rstrip("-")))
+        size = ((vol or {}).get("spec") or {}).get("size", "") if isinstance(vol, dict) else ""
+        try:
+            return float(str(size).removesuffix("Gi")) if str(size).endswith("Gi") else None
+        except ValueError:
+            return None
+
+    def model_rows(s: Session, p: Platform) -> list[dict[str, Any]]:
+        """The models of this tenant with where each is: ready, starting (downloading or loading) or failed."""
+        listed = _safe(p.models)
+        if not isinstance(listed, list):
+            return []
+        rows = []
+        for m in listed:
+            st = _safe(lambda m=m: p.status(m["app"]))
+            live = isinstance(st, dict) and st.get("state") is not None      # a failed lookup is {"error": ...}
+            state = st["state"] if live else "unknown"
+            phase = "ready" if m.get("ready") else ("failed" if state == "failed" else "starting")
+            rows.append({**m, "state": state, "runtime": st.get("runtime") if live else None, "phase": phase,
+                         "mine": m.get("owner") == s.user_id})
+        return rows
+
+    def chatbot_link(p: Platform, name: str) -> str | None:
+        """A link that opens the DataOS chatbot with this model selected, when the chatbot is deployed."""
+        app_name = os.environ.get("DAPP_CHATBOT_APP", "chatbot")
+        st = _safe(lambda: p.status(app_name))
+        if not (isinstance(st, dict) and st.get("state")):
+            return None
+        path = os.environ.get("DAPP_CHATBOT_PATH", f"/{app_name}")
+        return f"https://{fqdn}{path}/?model={name}"
+
+    @api.get("/models", response_class=HTMLResponse)
+    def models_page(request: Request):
+        s = need(request)
+        p = platform_for(s)
+        listed = _safe(p.models)
+        err = listed.get("error") if isinstance(listed, dict) else None
+        rows = model_rows(s, p) if err is None else []
+        for r in rows:                         # what a running model costs, from its real resources
+            res = ((_safe(lambda r=r: p.status(r["app"])) or {}).get("spec") or {}).get("resources") or {}
+            req, lim = res.get("requests") or {}, res.get("limits") or {}
+            if req.get("cpu") and req.get("memory") and r.get("source") != "config":
+                r["est"] = estimate(cpu=req["cpu"], cpu_limit=lim.get("cpu", req["cpu"]), memory=req["memory"],
+                                    memory_limit=lim.get("memory", req["memory"]), disk_gi=disk_of(p, r["app"]) or 0, size_gb=None)
+        deployed = {r.get("repo", "").upper(): r["name"] for r in rows}
+        cards = [card(c) for c in CATALOG]
+        by_id = {c["e"].id: c for c in cards}
+        picks = [("Just trying it, or simple tasks", "qwen2.5-0.5b", "Fast and cheap. This is what `small` is."),
+                 ("Everyday chat and summaries", "qwen2.5-1.5b", "A clear step up for instructions and JSON, still light."),
+                 ("The best answers, and you can wait", "qwen3-4b", "Reasons well; about 5 words per second on CPU.")]
+        return render(request, "models.html", s, rows=rows, cards=cards, deployed=deployed, models_error=err, rates=rates(),
+                      picks=[(t, by_id[i], why) for t, i, why in picks],
+                      tiers=[("light", "Fast and light", "Under 1 GB. Quick answers for simple jobs; cheapest to keep running."),
+                             ("balanced", "Balanced", "1 to 2 GB. Better instructions and structure for a modest cost."),
+                             ("capable", "Most capable", "2 to 3 GB. Best answers; slower, so give them 4 CPUs.")])
+
+    def estimate_data(entry, quants: dict[str, float] | None) -> dict[str, Any]:
+        """What the Deploy form's cost panel needs in the browser: rates, file sizes per quantization, the speed rule."""
+        return {"rates": rates(), "sizes": quants or {}, "file_gb": entry.size_gb if entry else None,
+                "tokens_per_gb_s": TOKENS_PER_GB_S, "default_quant": entry.quant.upper() if entry else ""}
+
+    def estimate_for(form: dict[str, Any], entry) -> dict[str, Any] | None:
+        try:
+            return estimate(cpu=str(form["cpu"]), cpu_limit=str(form["cpu_limit"]), memory=str(form["memory"]),
+                            memory_limit=str(form["memory_limit"]), disk_gi=float(form["disk_gi"]),
+                            size_gb=entry.size_gb if entry else None)
+        except (ValueError, KeyError):
+            return None
+
+    @api.get("/models/deploy", response_class=HTMLResponse)
+    def model_deploy_page(request: Request, id: str = "custom"):
+        s = need(request)
+        entry = catalog_entry(id)
+        if id != "custom" and entry is None:
+            raise HTTPException(404, "unknown model")
+        quants = hf_quants(entry.repo) if entry else None
+        form = deploy_form(entry)
+        return render(request, "model_deploy.html", s, entry=entry, form=form, quants=quants, open_custom=False,
+                      why=explain_defaults(entry) if entry else [], est=estimate_for(form, entry),
+                      est_data=estimate_data(entry, quants), card=card(entry) if entry else None)
+
+    @api.post("/models/deploy", response_class=HTMLResponse)
+    async def model_deploy(request: Request):
+        s = need(request)
+        form = await request.form()
+        check_csrf(s, str(form.get("csrf", "")))
+        entry = catalog_entry(str(form.get("model_id", "")))
+        try:
+            d = parse_deploy(form)
+            done = platform_for(s).deploy_model(d, compute=d.compute or models_compute, dataplane=models_dataplane)
+        except (ValueError, PlatformError, DataOSError, GatewayError) as e:
+            values = {**deploy_form(entry, hf=str(form.get("hf", ""))), **{k: v for k, v in form.items() if k != "csrf"}}
+            quants = hf_quants(entry.repo) if entry else None
+            resp = render(request, "model_deploy.html", s, entry=entry, form=values, error_text=str(e), open_custom=True,
+                          quants=quants, why=explain_defaults(entry) if entry else [], est=estimate_for(values, entry),
+                          est_data=estimate_data(entry, quants), card=card(entry) if entry else None)
+            resp.status_code = 400
+            return resp
+        return back(request, f"/models/{done['name']}",
+                    msg=f"Deploying {done['name']}: the model downloads on the first start (a minute or two), then it answers.")
+
+    @api.get("/models/{name}", response_class=HTMLResponse)
+    def model_page(request: Request, name: str, created: str | None = None, days: int = 30):
+        s = need(request)
+        p = platform_for(s)
+        m = next((r for r in model_rows(s, p) if r["name"] == name), None)
+        if m is None:
+            raise HTTPException(404, f"no model {name}")
+        days = days if days in (1, 7, 30, 90) else 30
+        st = _safe(lambda: p.status(m["app"]))
+        st = st if isinstance(st, dict) and st.get("state") else None
+        spec = (st or {}).get("spec") or {}
+        res = spec.get("resources") or {}
+        req, lim = res.get("requests") or {}, res.get("limits") or {}
+        est = None
+        if req.get("cpu") and req.get("memory") and m.get("source") != "config":
+            est = estimate(cpu=req["cpu"], cpu_limit=lim.get("cpu", req["cpu"]), memory=req["memory"],
+                           memory_limit=lim.get("memory", req["memory"]), disk_gi=disk_of(p, m["app"]) or 0, size_gb=None)
+        usage = _safe(lambda: gateway_for(s).summary(model=name, since_hours=days * 24, group_by="app"))
+        return render(request, "model_detail.html", s, m=m, st=st, svc=(spec.get("service") or {}), res=res, req=req, lim=lim,
+                      est=est, usage=usage, days=days, chatbot=chatbot_link(p, name), rates=rates(),
+                      base_url=f"{gateway_public_url(Context('d', fqdn, s.tenant))}/openai/v1",
+                      created=sessions_created.pop(created or "", None))
+
+    @api.post("/models/{name}/key")
+    def model_key(request: Request, name: str, csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        try:
+            k = platform_for(s).personal_llm_key()
+        except Exception as e:  # shown to the person
+            return back(request, f"/models/{name}", err=f"Could not create a key: {e}")
+        ref = secrets.token_urlsafe(8)  # show the key once, without putting it in a URL
+        sessions_created[ref] = k
+        return back(request, f"/models/{name}?created={ref}")
+
+    @api.post("/models/{name}/delete")
+    def model_delete(request: Request, name: str, confirm: str = Form(""), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        if confirm != name:
+            return back(request, f"/models/{name}", err=f"Type {name} to confirm")
+        p = platform_for(s)
+        try:
+            gone = p.delete_model(name)
+        except (DataOSError, PlatformError, GatewayError) as e:
+            return back(request, f"/models/{name}", err=str(e))
+        threading.Thread(target=p.delete_model_volume, args=(gone["volume"],), daemon=True,
+                         name=f"volume-{gone['volume']}").start()   # DataOS frees it once the pod has stopped
+        return back(request, "/models", msg=f"Deleted {name}. Its Volume (the downloaded model) is removed once the pod stops.")
+
+    # ------------------------------------------------------------------ Claude Code (one per person)
+    # Everyone deploys their own: its pod runs as them (DataOS gives it their identity), so what it deploys is theirs, nobody else can
+    # read their files or Claude sign-in, and their code and chats are saved in their own immortal-obj objects.
+    claude_compute = os.environ.get("DAPP_CLAUDE_COMPUTE") or models_compute
+
+    def claude_form(values: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {**CLAUDE_DEFAULTS, "compute": claude_compute, **(values or {})}
+
+    def claude_estimate(form: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            return estimate(cpu=str(form["cpu"]), cpu_limit=str(form["cpu_limit"]), memory=str(form["memory"]),
+                            memory_limit=str(form["memory_limit"]), disk_gi=0, size_gb=None)
+        except (ValueError, KeyError):
+            return None
+
+    def claude_page_data(s: Session, p: Platform, form: dict[str, Any]) -> dict[str, Any]:
+        mine = _safe(p.claude_instance)
+        if "app" not in mine:                                     # the lookup failed: {"error": ...}
+            mine = {"app": instance_name(s.user_id), "exists": False, "state": None, "token": False, "error": mine.get("error"),
+                    "url": f"https://{fqdn}/{instance_name(s.user_id)}/"}
+        live = {}
+        if mine.get("exists"):
+            res = ((_safe(lambda: p.status(mine["app"])) or {}).get("spec") or {}).get("resources") or {}
+            req, lim = res.get("requests") or {}, res.get("limits") or {}
+            if req.get("cpu") and req.get("memory"):
+                live = {"req": req, "lim": lim, "est": claude_estimate({"cpu": req["cpu"], "cpu_limit": lim.get("cpu", req["cpu"]),
+                                                                        "memory": req["memory"],
+                                                                        "memory_limit": lim.get("memory", req["memory"])})}
+        everyone = _safe(p.claude_instances)
+        return {"mine": mine, "live": live, "everyone": everyone if isinstance(everyone, list) else [],
+                "everyone_error": everyone.get("error") if isinstance(everyone, dict) else None, "form": form,
+                "est": claude_estimate(form), "rates": rates()}
+
+    @api.get("/claude", response_class=HTMLResponse)
+    def claude_page(request: Request):
+        s = need(request)
+        return render(request, "claude.html", s, **claude_page_data(s, platform_for(s), claude_form()))
+
+    @api.post("/claude/deploy", response_class=HTMLResponse)
+    async def claude_deploy(request: Request):
+        s = need(request)
+        form = await request.form()
+        check_csrf(s, str(form.get("csrf", "")))
+        p = platform_for(s)
+        values = {k: str(form.get(k, "")).strip() for k in ("compute", "cpu", "cpu_limit", "memory", "memory_limit")}
+        try:
+            d = ClaudeDeploy(**{k: v for k, v in values.items() if v}).check()
+            p.deploy_claude(d, compute=d.compute or claude_compute, token=str(form.get("token", "")))
+        except (ValueError, PlatformError, DataOSError, GatewayError) as e:
+            resp = render(request, "claude.html", s, error_text=str(e),
+                          **claude_page_data(s, p, claude_form({k: v for k, v in values.items() if v})))
+            resp.status_code = 400
+            return resp
+        return back(request, "/claude", msg="Deploying your Claude Code: it starts in a minute or two. Open it when it shows running.")
+
+    @api.post("/claude/token")
+    def claude_token(request: Request, token: str = Form(""), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        try:
+            done = platform_for(s).set_claude_token(token)
+        except (ValueError, PlatformError, DataOSError, GatewayError) as e:
+            return back(request, "/claude", err=str(e))
+        return back(request, "/claude", msg="Token saved. Your Claude Code restarts to use it (about a minute); you stay signed in "
+                                            "through restarts." if done["attached"] else
+                    "Token saved. It is used when you deploy your Claude Code.")
+
+    @api.post("/claude/stop")
+    def claude_stop(request: Request, csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        return _act(request, "/claude", lambda: platform_for(s).stop_claude(),
+                    "Stopped. The pod is gone and costs nothing; your files, chats and token are kept. Deploy again to continue.")
+
+    @api.post("/claude/delete")
+    def claude_delete(request: Request, confirm: str = Form(""), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        app = instance_name(s.user_id)
+        if confirm != app:
+            return back(request, "/claude", err=f"Type {app} to confirm")
+        return _act(request, "/claude", lambda: platform_for(s).delete_claude(),
+                    "Deleted, with its token and sign-in. Your files and chats are still in your Storage (workspace, claude-sessions).")
 
     def _act(request: Request, path: str, fn, ok: str) -> RedirectResponse:
         try:

@@ -42,7 +42,8 @@ files = objects.volume("workspace")         # files: write, read, ls, remove, pu
 db.share(user)                              # let a person read it
 ```
 Apps that are not built from the runtime image copy `src/dapp_objects.py` into their image (the chatbot Dockerfile does).
-The helper sends a `User-Agent` because Cloudflare blocks the default Python one.
+The helper sends a `User-Agent` because Cloudflare blocks the default Python one, and it waits out a gateway move: refused connections and 502/503/504 are
+retried for up to `DAPP_OBJECTS_RETRY_SECONDS` (default 45); a request that was sent and then timed out is not retried (it may have been done).
 
 ## Where we use it
 | Use | Object | Notes |

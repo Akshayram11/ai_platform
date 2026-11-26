@@ -150,10 +150,15 @@ name on the same OpenAI endpoint. To call them from a laptop, get a personal key
 it works for LLM calls only, not MCP tools):
 
 ```bash
-dapp llm-key personal --save ~/.dapp/llm.env      # OPENAI_API_KEY + OPENAI_BASE_URL, mode 600; --rotate replaces it
+dapp llm-key personal --save ~/.dapp/llm.env      # DAPP_KEY + DAPP_BASE_URL, mode 600; --rotate replaces it
 set -a; . ~/.dapp/llm.env; set +a
-python -c 'from openai import OpenAI; print(OpenAI().chat.completions.create(model="small", messages=[{"role":"user","content":"hi"}]).choices[0].message.content)'
+python -c 'import os; from openai import OpenAI; print(OpenAI(base_url=os.environ["DAPP_BASE_URL"], api_key=os.environ["DAPP_KEY"]).chat.completions.create(model="small", messages=[{"role":"user","content":"hi"}]).choices[0].message.content)'
 ```
+
+## Small models inside DataOS (`dapp model`)
+The dashboard's **Models** tab deploys small language models on DataOS CPUs in a few clicks (a sortable table with quality, speed, memory and an estimated
+cost; every llama.cpp setting under Customize). The same from a terminal: `dapp model catalog`, `dapp model deploy qwen2.5-0.5b --name small`,
+`dapp model ls`, `dapp model rm NAME --yes`. See [docs/models.md](docs/models.md).
 
 ## MCP tools through the gateway (`dapp tool`)
 

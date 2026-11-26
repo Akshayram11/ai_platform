@@ -17,6 +17,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
+from .claude import CLAUDE_CODE_IMAGE
 from .client import DataOS, DataOSError
 from .config import ConfigError, current_context_name, list_contexts, load_context
 from .ctl import WriteError
@@ -32,11 +33,14 @@ access_app = typer.Typer(no_args_is_help=True, help="Control who can use or mana
 keys_app = typer.Typer(no_args_is_help=True, help="Your DataOS API keys.", context_settings=HELP_OPTIONS)
 llm_key_app = typer.Typer(no_args_is_help=True, help="LLM gateway keys: the per-app key an app uses to call the LLM.", context_settings=HELP_OPTIONS)
 tool_app = typer.Typer(no_args_is_help=True, help="MCP tools through the gateway: register, share, connect, usage.", context_settings=HELP_OPTIONS)
+model_app = typer.Typer(no_args_is_help=True, context_settings=HELP_OPTIONS,
+                        help="Small language models on DataOS CPUs: catalog, deploy, list, delete (the dashboard's Models tab).")
 app.add_typer(secret_app, name="secret")
 app.add_typer(access_app, name="access")
 app.add_typer(keys_app, name="keys")
 app.add_typer(llm_key_app, name="llm-key")
 app.add_typer(tool_app, name="tool")
+app.add_typer(model_app, name="model")
 
 console = Console()
 err = Console(stderr=True)
@@ -200,7 +204,7 @@ public: false               # true = skip DataOS login in front of the app
 """
 
 
-CHATBOT_IMAGE = "docker.io/tmdcio/dapp-chatbot:0.1.12"   # public image built from examples/chatbot
+CHATBOT_IMAGE = "docker.io/tmdcio/dapp-chatbot:0.1.14"   # public image built from examples/chatbot
 CHATBOT_TEMPLATE = """\
 # A ready LLM chatbot: private (DataOS sign-in), calls go through the dapp gateway so tokens and cost are counted
 # per person. Nothing to build. Deploy with:  dapp deploy
@@ -214,15 +218,15 @@ compute: {compute}
 path: /{name}
 resources: {{cpu: 100m, memory: 192Mi, cpuLimit: 500m, memoryLimit: 384Mi}}
 llm: true
+objects: true                 # each signed-in person's chats are kept in immortal-obj and survive restarts
 metrics: true
 env:
   ROOT_PATH: /{name}          # must equal path
-  OPENAI_MODEL: gpt-6-luna
-  OPENAI_REASONING_EFFORT: low
+  OPENAI_MODEL: {model}       # the chat's default; every model deployed with `dapp model deploy` is also in its drop-down
+{reasoning}  # SYSTEM_PROMPT: You are a friendly assistant for our team.
 """
 
 
-CLAUDE_CODE_IMAGE = "docker.io/tmdcio/dapp-claude-code:0.1.4"   # built from apps/claude-code
 CLAUDE_CODE_TEMPLATE = """\
 # Your own Claude Code on DataOS: a browser terminal to build and deploy apps by asking. Only you (the owner) can
 # open it, and it deploys as you. Sign in with your Claude account inside the terminal. Deploy with:  dapp deploy
@@ -258,13 +262,19 @@ def init(
     file: Path = typer.Option(Path("dapp.yaml"), "--file", "-f"),
     force: bool = typer.Option(False, help="Overwrite an existing file"),
     template: str = typer.Option("blank", "--template", help="blank | chatbot (a ready OpenAI chatbot) | claude-code (your own Claude Code terminal)"),
+    model: str = typer.Option("gpt-6-luna", "--model", help="chatbot template: the model it answers with. Use the name of a model "
+                                                            "from `dapp model ls` for a low-cost chatbot that runs inside DataOS"),
 ) -> None:
     """Write a starter dapp.yaml. `--template chatbot` gives a working LLM chatbot you can deploy as is."""
     def go():
         if file.exists() and not force:
             raise PlatformError(f"{file} exists (use --force)")
         if template == "chatbot":
-            text = CHATBOT_TEMPLATE.format(name=name, image=CHATBOT_IMAGE, compute=compute_or_default(compute))
+            # reasoning effort is an OpenAI setting: only for their models, not for one running inside DataOS
+            reasoning = "  OPENAI_REASONING_EFFORT: low     # gpt-6-luna reasons by default; low keeps a chat fast and cheap\n" \
+                if model.startswith("gpt") else ""
+            text = CHATBOT_TEMPLATE.format(name=name, image=CHATBOT_IMAGE, compute=compute_or_default(compute), model=model,
+                                           reasoning=reasoning)
         elif template == "claude-code":
             try:  # the instance you're logged in to; the default one if there's no login yet
                 fqdn = load_context(state.context, state.tenant).fqdn
@@ -556,7 +566,7 @@ def llm_key_rotate(
 
 @llm_key_app.command("personal")
 def llm_key_personal(
-    save: Path = typer.Option(None, "--save", help="Write OPENAI_API_KEY and OPENAI_BASE_URL to this file (mode 600) "
+    save: Path = typer.Option(None, "--save", help="Write DAPP_KEY and DAPP_BASE_URL to this file (mode 600) "
                                                    "instead of printing the key"),
     rotate: bool = typer.Option(False, "--rotate", help="Revoke your earlier personal keys"),
 ) -> None:
@@ -568,12 +578,12 @@ def llm_key_personal(
             target.parent.mkdir(parents=True, exist_ok=True)
             target.touch(mode=0o600, exist_ok=True)
             target.chmod(0o600)
-            target.write_text(f"OPENAI_API_KEY={r['key']}\nOPENAI_BASE_URL={r['base_url']}\n")
+            target.write_text(f"DAPP_KEY={r['key']}\nDAPP_BASE_URL={r['base_url']}\n")
             _out({"app": r["app"], "prefix": r["prefix"], "saved": str(target), "base_url": r["base_url"]},
                  lambda x: console.print(f"key {x['prefix']}… saved to {x['saved']}\n"
-                                         f"use it: set -a; . {x['saved']}; set +a  (OpenAI SDK, model \"small\")"))
+                                         f"use it: set -a; . {x['saved']}; set +a   (then \"$DAPP_KEY\" and \"$DAPP_BASE_URL\")"))
         else:
-            _out(r, lambda x: console.print(f"OPENAI_API_KEY={x['key']}\nOPENAI_BASE_URL={x['base_url']}\n"
+            _out(r, lambda x: console.print(f"DAPP_KEY={x['key']}\nDAPP_BASE_URL={x['base_url']}\n"
                                             "[dim]shown once: the gateway keeps only a hash[/dim]"))
     _run(go)
 
@@ -592,6 +602,142 @@ def llm_key_revoke(
             typer.confirm(f"Revoke {prefix}…? If {app_name} still uses it, its LLM calls fail until you rotate.",
                           abort=True)
         _out(_platform().revoke_llm_key(app_name, prefix), lambda r: console.print(f"revoked {r['prefix']}…"))
+    _run(go)
+
+
+# ---------------------------------------------------------------- models
+def _model_cost(d_or_est) -> str:
+    cur = d_or_est["currency"]
+    return f"{cur}{d_or_est['day']:.2f}/day, {cur}{d_or_est['month']:.0f}/month"
+
+
+@model_app.command("catalog")
+def model_catalog() -> None:
+    """The models you can deploy, with quality, speed, what they need and an estimate of what keeping them running costs."""
+    from .models import CATALOG, defaults_for, estimate, quality_of, speed_of, tier_of, traits_of
+
+    rows = []
+    for m in CATALOG:
+        d = defaults_for(m)
+        e = estimate(cpu=d["cpu"], cpu_limit=d["cpu_limit"], memory=d["memory"], memory_limit=d["memory_limit"],
+                     disk_gi=d["disk_gi"], size_gb=m.size_gb)
+        rows.append({"id": m.id, "title": m.title, "params": m.params, "tier": tier_of(m), "quality": quality_of(m),
+                     "speed": speed_of(m.size_gb)[1], "words_per_s": round(e["words_per_s"]), "memory": d["memory_limit"],
+                     "cpu": d["cpu_limit"], "download_gb": m.size_gb, "cost_day": round(e["day"], 2), "cost_month": round(e["month"]),
+                     "licence": m.license, "good_for": ", ".join(traits_of(m)), "huggingface": m.hf})
+
+    def show(r):
+        _table([{"id": x["id"], "params": x["params"], "quality": f"{x['quality']}/5", "words/s": x["words_per_s"],
+                 "memory": x["memory"], "cpu": x["cpu"], "GB": x["download_gb"], "$/day": f"{x['cost_day']:.2f}"} for x in r],
+               ["id", "params", "quality", "words/s", "memory", "cpu", "GB", "$/day"], "Deploy with: dapp model deploy ID")
+        console.print("[dim]Quality is a rough guide (5 best), not a benchmark. $/day is an estimate from list prices (DAPP_COST_*) "
+                      "for comparing models; DataOS doesn't bill these apps. `dapp --json model catalog` has everything.[/dim]")
+    _out(rows, show)
+
+
+@model_app.command("ls")
+def model_ls() -> None:
+    """Models you can call in this tenant, whether each is ready, and who deployed it."""
+    def show(rows):
+        _table([{"model": m["name"], "state": "ready" if m.get("ready") else "starting", "weights": m.get("repo") or "-",
+                 "app": m.get("app"), "owner": m.get("owner") or "(gateway config)"} for m in rows],
+               ["model", "state", "weights", "app", "owner"])
+    _run(lambda: _out(_platform().models(), show))
+
+
+def _wait_ready(p: Platform, name: str, timeout: int) -> bool:
+    import time
+
+    deadline, shown = time.monotonic() + timeout, False
+    while time.monotonic() < deadline:
+        if any(m["name"] == name and m.get("ready") for m in p.models()):
+            return True
+        if not state.json:
+            err.print("[dim].[/dim]", end="")
+            shown = True
+        time.sleep(5)
+    if shown:
+        err.print()
+    return False
+
+
+@model_app.command("deploy")
+def model_deploy(
+    model: str = typer.Argument(None, metavar="[MODEL]", help="A catalog id, e.g. qwen2.5-1.5b (see `dapp model catalog`)"),
+    hf: str = typer.Option(None, "--hf", help="A custom Hugging Face GGUF repo instead: owner/repo[:Quant]"),
+    name: str = typer.Option(None, "--name", help="What callers put in `model` (default: the catalog id)"),
+    quant: str = typer.Option(None, "--quant", help="Quantization, e.g. Q4_K_M, Q5_K_M, Q8_0"),
+    compute: str = typer.Option(None, "--compute", help="Compute resource (default: DAPP_DEFAULT_COMPUTE or engineering-compute)"),
+    cpu: str = typer.Option(None, "--cpu", help="CPU reserved, e.g. 500m or 1"),
+    cpu_limit: str = typer.Option(None, "--cpu-limit", help="CPU limit in cores (8 at most)"),
+    memory: str = typer.Option(None, "--memory", help="Memory reserved, e.g. 1Gi"),
+    memory_limit: str = typer.Option(None, "--memory-limit", help="Memory limit, e.g. 2Gi"),
+    disk: int = typer.Option(None, "--disk", help="Volume size in Gi for the downloaded model"),
+    setting: list[str] = typer.Option(None, "--set", help="Any other setting as key=value, repeatable: ctx, parallel, threads, batch, "
+                                      "ubatch, flash_attn, cache_type_k, cache_type_v, max_tokens, reasoning, jinja, context_shift, "
+                                      "cont_batching, timeout_s, temperature, top_k, top_p, min_p, repeat_penalty"),
+    wait: bool = typer.Option(True, "--wait/--no-wait", help="Wait until the model has loaded and answers"),
+    timeout: int = typer.Option(900, help="Seconds to wait for it to load"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the settings and the cost estimate; deploy nothing"),
+) -> None:
+    """Deploy a small model: a Volume, a key, a private llama.cpp app, and its name in the gateway. Defaults fit the model;
+    every setting of the dashboard's Customize menu is a flag or a --set. The model downloads on its first start."""
+    from .models import build_deploy, estimate
+
+    def go():
+        extra: dict[str, str] = {}
+        for item in setting or []:
+            if "=" not in item:
+                raise ValueError(f"--set {item!r}: use key=value, e.g. --set ctx=8192")
+            k, v = item.split("=", 1)
+            extra[k.strip().replace("-", "_")] = v.strip()
+        d = build_deploy(model_id=model or "", hf=hf or "", name=name or "", overrides={
+            "quant": quant, "compute": compute, "cpu": cpu, "cpu_limit": cpu_limit, "memory": memory,
+            "memory_limit": memory_limit, "disk_gi": disk, **extra})
+        e = estimate(cpu=d.cpu, cpu_limit=d.cpu_limit, memory=d.memory, memory_limit=d.memory_limit, disk_gi=d.disk_gi,
+                     size_gb=d.size_gb)
+        plan = {"name": d.name, "weights": d.source, "app": d.app, "cpu": f"{d.cpu} (up to {d.cpu_limit})",
+                "memory": f"{d.memory} (up to {d.memory_limit})", "disk": f"{d.disk_gi}Gi", "context": d.ctx,
+                "estimated_cost": _model_cost(e), "speed": f"about {e['words_per_s']:.0f} words/s", "server_env": d.server_env()}
+        if dry_run:
+            _out(plan, lambda x: (console.print_json(json.dumps(x, default=str)),
+                                  console.print("[dim]dry run: nothing deployed[/dim]")))
+            return
+        p = _platform()
+        target = compute or d.compute or os.environ.get("DAPP_DEFAULT_COMPUTE") or "engineering-compute"
+        done = p.deploy_model(d, compute=target, dataplane=os.environ.get("DAPP_MODELS_DATAPLANE", "poldp01"))
+        ready = _wait_ready(p, d.name, timeout) if wait and not state.json else None
+        result = {**done, "estimated_cost": plan["estimated_cost"], "ready": ready}
+
+        def show(r):
+            console.print(f"deployed model [bold]{r['name']}[/bold] ({r['source']}) as app {r['app']}; "
+                          f"estimated cost {r['estimated_cost']}")
+            console.print("it is [green]ready[/green]" if r["ready"] else
+                          "it is starting: it downloads and loads the model (a minute or two). Check with `dapp model ls`.")
+            console.print(f"use it: dapp llm-key personal --save ~/.dapp/llm.env, then POST $DAPP_BASE_URL/chat/completions "
+                          f"with \"model\": \"{r['name']}\"; or `llm: true` in an app's dapp.yaml")
+        _out(result, show)
+    _run(go)
+
+
+@model_app.command("rm")
+def model_rm(
+    name: str = typer.Argument(..., metavar="MODEL"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask (agents must pass this)"),
+    keep_volume: bool = typer.Option(False, "--keep-volume", help="Leave the Volume with the downloaded model"),
+) -> None:
+    """Delete a model you deployed: the gateway stops routing to it, then its app and key go, then its Volume."""
+    def go():
+        if not yes:
+            if state.json or not sys.stdin.isatty():
+                raise PlatformError("refusing to delete without --yes")
+            typer.confirm(f"Delete model {name}? Calls to it stop working.", abort=True)
+        p = _platform()
+        gone = p.delete_model(name)
+        freed = None if keep_volume else p.delete_model_volume(gone["volume"], timeout=240)
+        _out({**gone, "volume_deleted": freed}, lambda r: console.print(
+            f"deleted model {r['name']} (app {r['app']})" + ("" if r["volume_deleted"] is None else
+                                                            f"; volume {'deleted' if r['volume_deleted'] else 'will be deleted once its pod stops'}")))
     _run(go)
 
 

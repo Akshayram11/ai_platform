@@ -62,7 +62,7 @@ def test_spec_rules(tmp_path):
     with pytest.raises(ValueError, match="are for runtime"):
         AppSpec(**BASE, image="i:1", command=["x"], run="y")
     m = render_app(AppSpec(**ok), tenant="t", user_id="alice")["spec"]["service"]
-    assert m["image"].endswith("/dapp-runtime:python-3.12-r8") and m["command"] == ["python", "/opt/dapp/dapp_run.py"]
+    assert m["image"].endswith("/dapp-runtime:python-3.12-r9") and m["command"] == ["python", "/opt/dapp/dapp_run.py"]
     assert m["envs"]["DAPP_RUN"] == "python app.py" and {"id": "dapp-rt-code"} in m["secrets"]
 
 

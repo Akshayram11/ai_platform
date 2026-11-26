@@ -222,3 +222,50 @@ def test_objects_true_in_dapp_yaml():
                                    "command": ["run"], "objects": True})
     assert spec.llm is True and spec.tools == ["immortal-obj"]
     assert json.dumps(render_app(spec.model_copy(update={"public": True}), tenant="ai", user_id="a"))
+
+
+def test_helper_waits_out_a_gateway_move():
+    """Connection refused or 502/503/504 are retried with a back-off; a sent request that failed otherwise is not."""
+    import json
+    import urllib.error
+
+    ok = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": {"result": 7}}}).encode()
+    calls, sleeps = [], []
+
+    def opener_for(*steps):
+        queue = list(steps)
+
+        def opener(req, timeout):
+            calls.append(1)
+            step = queue.pop(0) if queue else queue_last
+            if isinstance(step, Exception):
+                raise step
+            return _Resp(step)
+        queue_last = steps[-1]
+        return opener
+
+    refused = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+    c = dapp_objects.Client("http://gw/mcp/ai/immortal-obj", "k", opener=opener_for(refused, refused, ok),
+                            retry_seconds=30, sleep=sleeps.append)
+    assert c.call("get", {"object": "o", "key": "k"}) == 7 and len(calls) == 3 and sleeps == [1.0, 2.0]
+
+    calls.clear(), sleeps.clear()
+    unavailable = urllib.error.HTTPError("http://gw", 503, "unavailable", {}, io.BytesIO(b"no healthy upstream"))
+    c = dapp_objects.Client("http://gw/mcp/ai/immortal-obj", "k", opener=opener_for(unavailable, ok),
+                            retry_seconds=30, sleep=sleeps.append)
+    assert c.call("get", {"object": "o", "key": "k"}) == 7 and len(calls) == 2
+
+    calls.clear(), sleeps.clear()                                           # still down after the allowed time: gives up
+    c = dapp_objects.Client("http://gw/mcp/ai/immortal-obj", "k", opener=opener_for(refused), retry_seconds=4,
+                            sleep=sleeps.append)
+    with pytest.raises(urllib.error.URLError):
+        c.call("get", {"object": "o", "key": "k"})
+    assert 1 < len(calls) < 6 and len(sleeps) == len(calls) - 1
+
+    calls.clear(), sleeps.clear()                                           # a real refusal is answered at once
+    bad = urllib.error.HTTPError("http://gw", 401, "no", {}, io.BytesIO(b"nope"))
+    c = dapp_objects.Client("http://gw/mcp/ai/immortal-obj", "k", opener=opener_for(bad), retry_seconds=30,
+                            sleep=sleeps.append)
+    with pytest.raises(dapp_objects.ObjectsError, match="HTTP 401"):
+        c.call("get", {"object": "o", "key": "k"})
+    assert len(calls) == 1 and sleeps == []

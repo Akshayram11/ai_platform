@@ -3,15 +3,17 @@
 ## Live now (poliks, as of 2026-11-25)
 | App | Image | Notes |
 |---|---|---|
-| `dapp` (dashboard) | `dataos-apps:0.1.23` | `objects: true` |
-| `dapp-llm-gateway` | `dataos-apps:0.1.21` | Volume `dapp-gateway-data`; local model `small`; personal keys |
-| `llm-small` | `llm-small:b12679-m1` | Volume `llm-models`; private; metrics on |
+| `dapp` (dashboard) | `dataos-apps:0.1.26` | `objects: true`; Models tab |
+| `dapp-llm-gateway` | `dataos-apps:0.1.28` | Volume `dapp-gateway-data`; local model `small`; personal keys; model registry |
+| `model-<name>` | `llm-small:b12679-m1` | one per model deployed from the Models tab (own Volume `model-<name>-data`) |
 | `immortal-obj` | `dapp-runtime:python-3.12-r7` | Volume `immortal-obj` |
-| `chatbot` | `dapp-chatbot:0.1.12` | `llm`, `objects`, `metrics`; models `gpt-6-luna` and `small`; history |
+| `chatbot` | `dapp-chatbot:0.1.14` | `llm`, `objects`, `metrics`; models `gpt-6-luna` and `small`; history |
 | `data-chat` | runtime `python-3.12-r8` from source | `llm`, `objects`, `tools: [dataproduct-mcp]`; model `small` |
-| `claude-code` | `dapp-claude-code:0.1.4` | 500m→4 CPU, 2→4 GiB; token secret `dapp-claude-code-anthropic` |
-| Runtime image | `dapp-runtime:python-3.12-r8` | what `RUNTIME_REVISION` points at |
+| `claude-code` | `dapp-claude-code:0.1.7` | 500m→4 CPU, 2→4 GiB; token secret `dapp-claude-code-anthropic` |
+| Runtime image | `dapp-runtime:python-3.12-r9` | what `RUNTIME_REVISION` points at; apps pick it up on their next deploy |
 All images are under `docker.io/tmdcio/`. Nothing of this work is committed to git yet.
+
+`llm-small` (the first `small` model) was removed on 2026-11-25; deploy Qwen2.5 0.5B from the Models tab, named `small`, to get it back. Models deployed from the dashboard are listed on its Models tab (`GET /admin/models` on the gateway).
 
 ## Build and deploy
 ```bash
@@ -24,7 +26,7 @@ dapp deploy -f deploy/gateway.dapp.yaml           # then deploy/dashboard.dapp.y
 dapp --json status NAME                           # wait for running; a new pod name means the rollout finished
 dapp logs NAME -n 100
 ```
-Docker Desktop must be running to build. Bump the image tag in the manifest (and `CHATBOT_IMAGE`, `CLAUDE_CODE_IMAGE` in `src/dapp/cli.py`).
+The Claude Code image tag lives in `src/dapp/claude.py` (the dashboard's Claude Code tab and `dapp init --template claude-code`), `apps/claude-code/Dockerfile` and `dapp.yaml`: bump all three. Docker Desktop must be running to build. Bump the image tag in the manifest (and `CHATBOT_IMAGE`, `CLAUDE_CODE_IMAGE` in `src/dapp/cli.py`).
 After a deploy that replaces a pod, check the new pod's logs rather than the old one's.
 
 ## Secrets (names only)
@@ -45,6 +47,8 @@ Local `.env` files (gitignored): `apps/immortal-obj/.env`, `apps/llm-small/.env`
 | Global `dapp` rejects `volumes:` / `objects:` | It is older than the repo: `uv tool install --force .` |
 | `dapp tool add` has no `--env-file` | `(set -a; . file; set +a; dapp tool add … --auth-env VAR)` |
 | Compute card shows pods of other people | Metrics are filtered by service name now ([dashboard.md](dashboard.md)) |
+| Deploy from the Claude Code pod fails with "owner is required", then the app errors "secret does not exist" / "base64Value is not valid base64" | The REST writer (`ApiWriter`, used in the pod and the dashboard) did not do what `dataos-ctl` does: set `owner` to the signed-in user, and base64-encode key-value secret values. Fixed in `src/dapp/ctl.py` (claude-code 0.1.5, dashboard 0.1.24); test: `tests/test_ctl_api_writer.py`. Check a pod change like this with `DAPP_WRITER=api uv run dapp deploy -f …` from the laptop |
+| `Connection refused` to `dapp-gateway:8080` for about a minute, now and then (chat history, MCP, workspace save fail; a pod restarts) | DataOS moves pods in the `core-kernel` pool to another node (events: kubelet "Stopping container", then `FailedAttachVolume` while the exclusive Volume detaches; seen at 11:55, 12:27, 12:46 on 2026-11-25, together for the gateway and llm-small). Not a crash: memory was 79 of 512 MiB. We cannot stop it (ask the platform team why the pool churns); clients now wait it out: `dapp_objects` (`DAPP_OBJECTS_RETRY_SECONDS`, default 45) and the MCP client in `mcp_tools.py` (`MCP_RETRY_SECONDS`) retry refused connections, connect timeouts and 502/503/504 with a 1-5 s back-off, but never a request that was sent and then timed out. The Claude Code start-up restore waits up to 180 s. An app with its own HTTP client needs the same loop |
 | Claude asks to sign in again | Pod replaced; use the token secret ([claude-code.md](claude-code.md)) |
 | llm-small: every call from outside is 401/403 | Intended (private); go through the gateway |
 | `sed -i` on macOS | needs `sed -i ''` |

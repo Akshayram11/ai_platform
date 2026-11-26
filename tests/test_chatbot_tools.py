@@ -145,18 +145,66 @@ def test_model_switch(chatbot, monkeypatch):
                     calls.append(kw)
                     return iter([])
 
-    monkeypatch.setattr(chatbot, "MODELS", [chatbot.MODEL, "small"])
+    served = [{"name": "small", "repo": "", "ready": True}, {"name": "qwen-test", "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M", "ready": False}]
+    monkeypatch.setattr(chatbot, "STATIC_MODELS", ["small"])
+    monkeypatch.setattr(chatbot, "local_models", lambda: served)
     monkeypatch.setattr(chatbot, "REASONING_EFFORT", "low")
     monkeypatch.setattr(chatbot, "TOOLS", None)
     monkeypatch.setattr(chatbot, "_client", Fake())
     from fastapi.testclient import TestClient
     c = TestClient(chatbot.app)
-    assert c.get("/api/models").json() == {"default": chatbot.MODEL, "models": [chatbot.MODEL, "small"]}
+    listed = c.get("/api/models").json()
+    assert listed["default"] == chatbot.MODEL and listed["models"] == [chatbot.MODEL, "small", "qwen-test"]    # deployed ones show up
+    assert listed["status"]["qwen-test"] == {"ready": False, "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M", "local": True}
+    assert listed["status"]["small"]["ready"] is True and listed["status"][chatbot.MODEL] == {"ready": True, "repo": "", "local": False}
     c.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}], "model": "small"})
     assert calls[-1]["model"] == "small" and "extra_body" not in calls[-1]
     c.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert calls[-1]["model"] == chatbot.MODEL and calls[-1]["extra_body"] == {"reasoning_effort": "low"}
     assert c.post("/api/chat", json={"messages": [], "model": "gpt-5-pro"}).status_code == 400
+    n = len(calls)                                                    # a model that is still loading: say so, don't call it
+    r = c.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}], "model": "qwen-test"})
+    assert "still starting" in r.text and len(calls) == n
+    served[1]["ready"] = True                                         # its server finished loading
+    c.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}], "model": "qwen-test"})
+    assert calls[-1]["model"] == "qwen-test" and "extra_body" not in calls[-1]
+    served.pop(1)                                                     # deleted in the dashboard: gone from the list, refused
+    assert c.get("/api/models").json()["models"] == [chatbot.MODEL, "small"]
+    assert c.post("/api/chat", json={"messages": [], "model": "qwen-test"}).status_code == 400
+
+
+def test_local_models_come_from_the_gateway_and_are_cached(chatbot, monkeypatch):
+    fake = types.ModuleType("openai")
+    fake.OpenAI = object
+    monkeypatch.setitem(sys.modules, "openai", fake)
+    monkeypatch.setenv("DAPP_LLM_GATEWAY_URL", "http://dapp-gateway:8080")
+    monkeypatch.setenv("DAPP_LLM_KEY", "dapp_appkey")
+    monkeypatch.delenv("DAPP_TOOLS", raising=False)
+    monkeypatch.setenv("DAPP_METRICS", "0")
+    sys.modules.pop("app", None)
+    import app as bot
+
+    asked = []
+    answers = [httpx.Response(200, json={"models": [{"name": "small", "ready": True}]}), httpx.ConnectError("gateway moving")]
+
+    def get(url, headers, timeout):
+        asked.append((url, headers["authorization"]))
+        a = answers.pop(0)
+        if isinstance(a, Exception):
+            raise a
+        return a
+
+    monkeypatch.setattr(bot.httpx, "get", get)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(bot.time, "monotonic", lambda: clock["t"])
+    assert [m["name"] for m in bot.local_models()] == ["small"] and asked == [("http://dapp-gateway:8080/local-models", "Bearer dapp_appkey")]
+    bot.local_models()
+    assert len(asked) == 1                                            # cached for a few seconds
+    clock["t"] += 9
+    assert [m["name"] for m in bot.local_models()] == ["small"] and len(asked) == 2     # the gateway is moving: keep the last list
+    monkeypatch.setenv("DAPP_LLM_KEY", "")
+    monkeypatch.setattr(bot, "_local", {"at": -1e9, "models": []})
+    assert bot.local_models() == []                                   # no key (llm: false): just the configured models
 
 
 class FakeObjects:
@@ -244,3 +292,40 @@ def test_chat_still_works_when_history_cannot_be_saved(chatbot, monkeypatch):
     off = history_bot(monkeypatch, None)
     assert off.get("/api/history").json() == {"enabled": False, "chats": []}
     assert off.get("/api/history/x").status_code == 404
+
+
+def test_toolbox_waits_out_a_gateway_move(chatbot, monkeypatch):
+    """DataOS moves the gateway to another node now and then: refused connections and 502/503 for about a minute."""
+    sleeps = []
+    monkeypatch.setattr(chatbot, "_sleep", sleeps.append)
+    seen: list[httpx.Request] = []
+    good = mcp_server(seen)
+    state = {"n": 0}
+
+    def flaky(req: httpx.Request) -> httpx.Response:
+        state["n"] += 1
+        if state["n"] <= 2:
+            raise httpx.ConnectError("[Errno 111] Connection refused", request=req)
+        if state["n"] == 3:
+            return httpx.Response(503, text="no healthy upstream")
+        return good(req)
+
+    box = chatbot.Toolbox(["dataproduct-mcp"], "http://gw/mcp/engineering", "dapp_appkey", transport=httpx.MockTransport(flaky))
+    assert [s["function"]["name"] for s in box.openai_tools("carol")] == ["dataproduct_mcp__search"]
+    assert state["n"] == 6 and sleeps == [1.0, 2.0, 3.0]    # 3 failures waited out (initialize), then initialized + tools/list
+
+    def down(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("[Errno 111] Connection refused", request=req)
+
+    monkeypatch.setattr(chatbot, "RETRY_SECONDS", 4.0)
+    sleeps.clear()
+    gone = chatbot.Toolbox(["dataproduct-mcp"], "http://gw/mcp/engineering", "k", transport=httpx.MockTransport(down))
+    assert gone.openai_tools("carol") == [] and "Connection refused" in gone.problems[0]     # gives up, says why
+    assert 0 < len(sleeps) < 6
+
+    def refused(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "no"})
+
+    sleeps.clear()
+    bad = chatbot.Toolbox(["dataproduct-mcp"], "http://gw/mcp/engineering", "k", transport=httpx.MockTransport(refused))
+    assert bad.openai_tools("carol") == [] and sleeps == []                    # a real refusal is not retried

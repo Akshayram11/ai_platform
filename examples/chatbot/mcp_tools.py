@@ -7,6 +7,10 @@ dapp sets, for apps deployed with `tools: [...]` in dapp.yaml:
 
 The app never holds a tool's credential: the gateway checks that this app may use the tool, adds the tool's own
 credential and records the call (with the signed-in person we pass in x-dapp-user).
+
+DataOS sometimes moves the gateway to another node; it is unreachable for about a minute. A request that never reached it
+(connection refused, connect timeout) or got a 502/503/504 is retried with a short back-off for up to MCP_RETRY_SECONDS
+(default 45). A request that was sent and then timed out is not retried: it may have been done.
 """
 
 from __future__ import annotations
@@ -15,12 +19,15 @@ import json
 import logging
 import os
 import threading
+import time
 
 import httpx
 
 log = logging.getLogger("chatbot.tools")
 SEP = "__"                 # OpenAI function name = <tool>__<function>; both parts are [A-Za-z0-9_-]
 MAX_RESULT = 12_000        # characters of a tool result handed back to the model
+RETRY_SECONDS = float(os.environ.get("MCP_RETRY_SECONDS", "45"))
+_sleep = time.sleep        # replaced in tests
 
 
 class ToolError(RuntimeError):
@@ -61,7 +68,17 @@ class Server:
             h["mcp-session-id"] = self.session
         if user:
             h["x-dapp-user"] = user
-        return self.http.post(self.url, json=payload, headers=h)
+        deadline, delay = time.monotonic() + RETRY_SECONDS, 1.0
+        while True:
+            try:
+                r = self.http.post(self.url, json=payload, headers=h)
+                if r.status_code not in (502, 503, 504) or time.monotonic() + delay >= deadline:
+                    return r
+            except (httpx.ConnectError, httpx.ConnectTimeout):      # nothing reached the gateway
+                if time.monotonic() + delay >= deadline:
+                    raise
+            _sleep(delay)
+            delay = min(delay + 1.0, 5.0)
 
     def _open(self, user: str) -> None:
         self._id += 1

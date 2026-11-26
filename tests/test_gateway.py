@@ -269,3 +269,75 @@ def test_personal_key(tmp_path, monkeypatch):
     assert c.delete(f"/admin/keys/ai/user:alice/{r['prefix']}", headers={"apikey": "alice-key"}).json()["revoked"] == 1
     assert c.post("/openai/v1/chat/completions", json={"model": "gpt-4o-mini", "messages": []},
                   headers=h).status_code == 401
+
+
+def test_models_deployed_from_the_dashboard_are_registered_and_routed(tmp_path, monkeypatch):
+    """A model server someone deployed (llama.cpp in a DataOS app) is reachable as `model: <name>` for keys of its tenant."""
+    from cryptography.fernet import Fernet
+
+    from dapp_gateway.tools import Vault
+
+    seen = []
+    health = {"qwen": False}                      # llama-server says 503 while it loads, 200 when ready
+
+    def upstream_any(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/health":
+            ok = req.url.host == "llm-small" or health["qwen"]
+            return httpx.Response(200 if ok else 503, json={"status": "ok" if ok else "loading model"})
+        seen.append(req)
+        return httpx.Response(200, json={"model": json.loads(req.content)["model"], "choices": [],
+                                         "usage": {"prompt_tokens": 3, "completion_tokens": 1}})
+
+    def dataos_models(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/resources/app/model-qwen-test"):
+            return httpx.Response(200, json={"name": "model-qwen-test", "owner": "alice", "spec": {"app": {"owners": ["alice"]}}})
+        return httpx.Response(404, json={})
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real")
+    monkeypatch.setenv("DATAOS_FQDN", "x.dataos.cloud")
+    monkeypatch.setenv("DAPP_LOCAL_MODELS", '{"small": {"url": "http://llm-small:8080", "key_env": "LLM_SMALL_KEY"}}')
+    app = create_app(store=Store(f"sqlite:///{tmp_path}/g.db"), heimdall=FakeHeimdall(),
+                     upstream_transport=httpx.MockTransport(upstream_any), dataos_transport=httpx.MockTransport(dataos_models),
+                     vault=Vault(Fernet.generate_key().decode()))
+    c = TestClient(app)
+    alice, bob = {"apikey": "alice-key"}, {"apikey": "bob-key"}
+    body = {"tenant": "ai", "name": "qwen-test", "app": "model-qwen-test", "url": "http://model-qwen-test:8080",
+            "key": "llama-secret", "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M"}
+
+    assert c.post("/admin/models", json=body).status_code == 401
+    assert c.post("/admin/models", json=body, headers=bob).status_code == 403            # not the app's owner
+    for bad in ({"name": "gpt-4o-mini"}, {"name": "Claude"}, {"name": "x"}, {"url": "http://169.254.169.254:80"},
+                {"url": "http://evil.example.com:8080"}):
+        assert c.post("/admin/models", json={**body, **bad}, headers=alice).status_code == 422, bad
+    assert c.post("/admin/models", json={**body, "name": "small"}, headers=alice).status_code == 409   # config's own name
+    made = c.post("/admin/models", json=body, headers=alice).json()
+    assert made["name"] == "qwen-test" and made["owner"] == "alice" and "key" not in made
+    assert c.post("/admin/models", json=body, headers=alice).status_code == 409                       # taken
+    listed = c.get("/admin/models?tenant=ai", headers=bob).json()
+    assert {m["name"]: m["source"] for m in listed} == {"small": "config", "qwen-test": "dashboard"}
+    assert "llama-secret" not in json.dumps(listed)
+    assert {m["name"]: m["ready"] for m in listed} == {"small": True, "qwen-test": False}       # loading: not ready yet
+
+    key = c.post("/admin/keys", json={"app": "model-qwen-test", "tenant": "ai"}, headers=alice).json()["key"]
+    h = {"authorization": f"Bearer {key}"}
+    assert c.post("/openai/v1/chat/completions", json={"model": "qwen-test", "messages": []}, headers=h).status_code == 200
+    assert str(seen[-1].url) == "http://model-qwen-test:8080/v1/chat/completions"
+    assert seen[-1].headers["authorization"] == "Bearer llama-secret"                        # the server's own key, not ours
+    rows = c.get("/admin/usage?group_by=provider,model", headers=alice).json()["rows"]
+    assert {(r["provider"], r["model"]) for r in rows} == {("local", "qwen-test")}             # metered like any model
+
+    health["qwen"] = True                                                       # (the answer is cached for 5 s)
+    just_up = c.get("/local-models", headers=h).json()["models"]                # an app's own key lists what it can ask for
+    assert [m["name"] for m in just_up] == ["small", "qwen-test"] and all("url" not in m and "key" not in m for m in just_up)
+    assert c.get("/local-models").status_code == 401 and c.get("/local-models", headers={"authorization": "Bearer nope"}).status_code == 401
+
+    other = c.post("/admin/keys", json={"app": "model-qwen-test", "tenant": "other"}, headers=alice).json()["key"]
+    c.post("/openai/v1/chat/completions", json={"model": "qwen-test", "messages": []}, headers={"authorization": f"Bearer {other}"})
+    assert seen[-1].url.host == "api.openai.com"                                               # another tenant's key: not routed
+    assert [m["name"] for m in c.get("/local-models", headers={"authorization": f"Bearer {other}"}).json()["models"]] == ["small"]
+
+    assert c.delete("/admin/models/ai/qwen-test", headers=bob).status_code == 403
+    assert c.delete("/admin/models/ai/qwen-test", headers=alice).json()["app"] == "model-qwen-test"
+    assert c.delete("/admin/models/ai/qwen-test", headers=alice).status_code == 404
+    c.post("/openai/v1/chat/completions", json={"model": "qwen-test", "messages": []}, headers=h)
+    assert seen[-1].url.host == "api.openai.com"                                               # gone: back to the provider

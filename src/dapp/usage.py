@@ -112,12 +112,6 @@ class GatewayUsage:
         r.raise_for_status()
         return r.json()
 
-    def models_served_by(self, app: str) -> list[str]:
-        """Local models (e.g. "small") that this DataOS app serves for the gateway."""
-        r = self.http.get("/healthz")
-        r.raise_for_status()
-        return sorted(m for m, host in (r.json().get("local_model_apps") or {}).items() if host == app)
-
     def list_keys(self) -> list[dict[str, Any]]:
         r = self.http.get("/admin/keys")
         r.raise_for_status()
@@ -143,15 +137,33 @@ class GatewayUsage:
         r.raise_for_status()
         return r.json()
 
+    # ---- models served by DataOS apps
+    def list_models(self, tenant: str | None = None) -> list[dict[str, Any]]:
+        return self._tool_call("GET", "/admin/models", params={"tenant": tenant} if tenant else None)
+
+    def register_model(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self._tool_call("POST", "/admin/models", json=body)
+
+    def unregister_model(self, tenant: str, name: str) -> dict[str, Any]:
+        return self._tool_call("DELETE", f"/admin/models/{tenant}/{name}")
+
+    def models_served_by(self, app: str) -> list[str]:
+        """Models (e.g. "small") that this DataOS app serves for the gateway."""
+        return sorted(m["name"] for m in self.list_models() if m.get("app") == app)
+
     # ---- MCP tools
     def _tool_call(self, method: str, path: str, **kw) -> Any:
         """Gateway errors come back as {error: {message}}; surface that text instead of a bare HTTP status."""
         r = self.http.request(method, path, **kw)
         if r.status_code >= 400:
             try:
-                msg = r.json()["error"]["message"]
+                body = r.json()
+                msg = body["error"]["message"] if "error" in body else body["detail"]
+                msg = msg if isinstance(msg, str) else str(msg)[:300]
             except (ValueError, KeyError, TypeError):
                 msg = r.text[:300]
+                if msg.lstrip().startswith("<") or r.status_code in (502, 503, 504):   # an error page from the ingress, not the gateway
+                    msg = "the gateway is restarting or not reachable; try again in a minute"
             raise GatewayError(f"gateway: {msg} (HTTP {r.status_code})")
         return r.json()
 

@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from mcp_tools import Toolbox
@@ -35,7 +37,11 @@ log = logging.getLogger("chatbot")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 # Models the user may switch to in the page (the first is MODEL). Others, e.g. "small" (served inside DataOS by the
 # gateway), get a plain chat: no reasoning setting and no tools, which small models don't handle well.
-MODELS = [MODEL, *[m.strip() for m in os.environ.get("OPENAI_MODELS", "").split(",") if m.strip() and m.strip() != MODEL]]
+# OPENAI_MODELS names some up front; the rest come live from the gateway: every model deployed in the dashboard's Models tab
+# shows up in the drop-down within seconds, marked "starting" until its server has loaded it.
+STATIC_MODELS = [m.strip() for m in os.environ.get("OPENAI_MODELS", "").split(",") if m.strip() and m.strip() != MODEL]
+GATEWAY = os.environ.get("DAPP_LLM_GATEWAY_URL", "").rstrip("/")
+_local: dict = {"at": -1e9, "models": []}
 SYSTEM = os.environ.get("SYSTEM_PROMPT", "You are a helpful, concise assistant running on DataOS.")
 REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "")  # reasoning models only: none|low|medium|high
 MAX_TURNS = 20
@@ -67,9 +73,34 @@ def index() -> str:
     return PAGE.replace("{{MODEL}}", MODEL)
 
 
+def local_models() -> list[dict]:
+    """Models served inside DataOS that this app's gateway key can use (name, repo, ready), cached for a few seconds.
+    If the gateway can't be asked, the last answer stays."""
+    key = os.environ.get("DAPP_LLM_KEY", "")
+    if GATEWAY and key and time.monotonic() - _local["at"] > 8:
+        try:
+            r = httpx.get(f"{GATEWAY}/local-models", headers={"authorization": f"Bearer {key}"}, timeout=3)
+            if r.status_code == 200:
+                _local["models"] = r.json().get("models", [])
+        except (httpx.HTTPError, ValueError) as e:
+            log.info("could not list the local models: %s", e)
+        _local["at"] = time.monotonic()
+    return _local["models"]
+
+
+def model_status() -> dict[str, dict]:
+    """Every model the page offers: the default first, then the static ones, then what the gateway lists. status has the
+    ready flag of the local ones."""
+    local = {m["name"]: m for m in local_models()}
+    names = [MODEL, *[m for m in STATIC_MODELS if m not in (MODEL,)], *[n for n in local if n != MODEL and n not in STATIC_MODELS]]
+    return {n: ({"ready": bool(local[n].get("ready")), "repo": local[n].get("repo", ""), "local": True} if n in local
+                else {"ready": True, "repo": "", "local": n != MODEL}) for n in names}
+
+
 @app.get("/api/models")
 def models() -> dict:
-    return {"default": MODEL, "models": MODELS}
+    status = model_status()
+    return {"default": MODEL, "models": list(status), "status": status}
 
 
 def who(request: Request) -> str:
@@ -151,7 +182,7 @@ def delete_history(chat_id: str, request: Request) -> dict:
 
 @app.get("/healthz")
 def healthz() -> dict:
-    return {"ok": True, "model": MODEL, "models": MODELS, "via_gateway": "dapp" in os.environ.get("OPENAI_BASE_URL", ""),
+    return {"ok": True, "model": MODEL, "models": list(model_status()), "via_gateway": "dapp" in os.environ.get("OPENAI_BASE_URL", ""),
             "tools": list(TOOLS.servers) if TOOLS else [], "history": HISTORY}
 
 
@@ -165,8 +196,9 @@ def gateway_user_headers(request: Request) -> dict[str, str]:
 @app.post("/api/chat")
 def chat(req: ChatRequest, request: Request) -> StreamingResponse:
     model = req.model or MODEL
-    if model not in MODELS:
-        raise HTTPException(400, f"model must be one of {', '.join(MODELS)}")
+    status = model_status()
+    if model not in status:
+        raise HTTPException(400, f"model must be one of {', '.join(status)}")
     main = model == MODEL
     user_headers = gateway_user_headers(request)
     turns = [m.model_dump() for m in req.messages if m.role in ("user", "assistant")][-MAX_TURNS:]
@@ -187,6 +219,10 @@ def chat(req: ChatRequest, request: Request) -> StreamingResponse:
 
     def produce():
         global _client
+        if not status[model]["ready"]:
+            yield (f"[{model} is still starting: its server is downloading and loading the model. "
+                   "Try again in a minute, or pick another model.]")
+            return
         try:
             # DAPP_LLM_KEY (gateway key) when deployed with llm: true; otherwise OPENAI_API_KEY from the environment
             _client = _client or OpenAI(api_key=os.environ.get("DAPP_LLM_KEY") or None)

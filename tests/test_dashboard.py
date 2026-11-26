@@ -161,14 +161,19 @@ class FakePlatform:
     def __init__(self):
         self.calls = []
         self.owners = ["alice"]
+        self.claude = {"exists": False, "state": None, "token": False}
 
     def list_apps(self, everyone=False, with_access=False):
         mk = lambda n, acc: {"name": n, "tenant": "engineering", "owner": "alice", "state": "running", "status": "active",
                              "runtime": "app-service:running:1", "error": None, "managed_by_dapp": True,
                              "url": f"https://x/{n}/", "access": acc}
-        return [mk("chatbot", {"mode": "login", "everyone": False, "people": 1, "roles": 0}),
+        rows = [mk("chatbot", {"mode": "login", "everyone": False, "people": 1, "roles": 0}),
                 mk("dash", {"mode": "login", "everyone": True, "people": 1, "roles": 0}),
                 mk("gw", {"mode": "public"})]
+        rows[0].update(secrets=["dapp-chatbot-llm", "dapp-chatbot-oidc"], volumes=[], disk=None)
+        rows[1].update(secrets=["dapp-dash-code"], volumes=[{"id": "dash-data", "directory": "/data", "readOnly": False}], disk=None)
+        rows[2].update(secrets=[], volumes=[], disk="2Gi")
+        return rows
 
     def status(self, name):
         if name == "missing":
@@ -197,6 +202,70 @@ class FakePlatform:
     def allow(self, app, users=(), roles=(), verify=True):
         self.calls.append(("allow", app, list(users)))
         return {}
+
+    def claude_instance(self):
+        return {"app": "claude-alice", "url": "https://x.dataos.cloud/claude-alice/", **self.claude}
+
+    def claude_instances(self):
+        return [{"name": "claude-alice", "owner": "alice", "state": self.claude["state"] or "stopped"},
+                {"name": "claude-bob", "owner": "bob", "state": "running"}]
+
+    def deploy_claude(self, d, *, compute, token=""):
+        from dapp.claude import clean_token
+        token = clean_token(token)
+        self.calls.append(("deploy_claude", d.cpu, d.cpu_limit, d.memory, d.memory_limit, compute, bool(token)))
+        if self.claude["exists"]:
+            from dapp.platform import PlatformError
+            raise PlatformError("your Claude Code (claude-alice) is already deployed")
+        self.claude = {"exists": True, "state": "initializing", "token": bool(token) or self.claude["token"]}
+        return {"app": "claude-alice", "url": "https://x/claude-alice/", "token": self.claude["token"], "notes": []}
+
+    def set_claude_token(self, token):
+        from dapp.claude import clean_token
+        self.calls.append(("claude_token", bool(clean_token(token))))
+        self.claude = {**self.claude, "token": True}
+        return {"attached": self.claude["exists"]}
+
+    def stop_claude(self):
+        self.calls.append(("stop_claude",))
+        self.claude = {**self.claude, "exists": False, "state": None}
+        return {}
+
+    def delete_claude(self):
+        self.calls.append(("delete_claude",))
+        self.claude = {"exists": False, "state": None, "token": False}
+        return {}
+
+    def models(self):
+        return getattr(self, "deployed", []) + [{"name": "small", "tenant": "engineering", "owner": "", "app": "llm-small", "repo": "", "description": "",
+                 "created": "", "source": "config", "ready": True},
+                {"name": "qwen-test", "tenant": "engineering", "owner": "alice", "app": "model-qwen-test",
+                 "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M", "description": "", "created": "", "source": "dashboard",
+                 "ready": True},
+                {"name": "bobs-model", "tenant": "engineering", "owner": "bob", "app": "model-bobs-model",
+                 "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M", "description": "", "created": "", "source": "dashboard",
+                 "ready": False}]
+
+    def deploy_model(self, d, *, compute, dataplane):
+        self.calls.append(("deploy_model", d.name, d.source, compute, dataplane, d.server_env(), d.cpu_limit, d.memory_limit))
+        if d.name == "taken":
+            from dapp.platform import PlatformError
+            raise PlatformError("a model called taken already exists")
+        self.deployed = getattr(self, "deployed", []) + [{"name": d.name, "tenant": "engineering", "owner": "alice", "app": d.app,
+                                                          "repo": d.source, "description": "", "created": "", "source": "dashboard",
+                                                          "ready": False}]
+        return {"name": d.name, "app": d.app, "url": f"https://x/{d.app}/"}
+
+    def delete_model(self, name):
+        self.calls.append(("delete_model", name))
+        return {"name": name, "app": f"model-{name}", "volume": f"model-{name}-data", "output": ""}
+
+    def delete_model_volume(self, volume):
+        self.calls.append(("delete_volume", volume))
+        return True
+
+    def personal_llm_key(self, rotate=False):
+        return {"key": "dapp_PERSONALKEY", "app": "user:alice", "prefix": "dapp_PERSONAL", "base_url": "https://x/openai/v1"}
 
     def list_users(self):
         return [{"id": "carol", "name": "Carol K", "email": "c@x", "type": "person"}]
@@ -280,6 +349,10 @@ def test_every_page_loads_through_the_real_routes(monkeypatch):
     assert home.status_code == 200 and "Your apps" in home.text
     assert "1 person" in home.text and ">everyone<" in home.text and ">public<" in home.text   # Access column
     assert "/storage" in home.text and 'class="on"' in home.text                              # nav, current page marked
+    for needle in ("<th title=\"DataOS secrets", ">Secrets<", ">Volumes<", "dapp-chatbot-llm", "dapp-chatbot-oidc", "dapp-dash-code",
+                   "dash-data", "mounted at /data", "disk 2Gi", "none: files are lost on restart"):   # secrets and volumes, same table
+        assert needle in home.text, needle
+    assert "?tab=secrets" in home.text
     assert "/apps/chatbot?tab=access" in home.text and "Manage" in home.text
     keys = c.get("/keys")
     assert keys.status_code == 200 and "dapp_NEW" in keys.text and "mine" in keys.text
@@ -510,3 +583,174 @@ def test_access_requests_need_storage(monkeypatch):
     page = c.get("/request-access", params={"app": "chatbot"})
     assert page.status_code == 200 and "switched on for this dashboard" in page.text
     assert "waiting for you" not in c.get("/").text                                       # no badge without storage
+
+
+def test_models_tab_lists_deploys_customizes_and_deletes(monkeypatch):
+    import re
+    import time
+    from urllib.parse import urlparse
+
+    import dapp_dashboard.app as dash
+    from dapp import models as models_mod
+    from dapp.models import CATALOG
+
+    quants = {"Q4_K_M": 0.46, "Q5_K_M": 0.49, "Q8_0": 0.63}
+    monkeypatch.setattr(dash, "hf_quants", lambda repo, **k: quants)
+    monkeypatch.setattr(models_mod, "hf_quants", lambda repo, **k: quants)               # the check at deploy time
+    fake = FakePlatform()
+    c = signed_in_with_fakes(monkeypatch, platform_factory=lambda s, t=None: fake)
+
+    home = c.get("/models")
+    assert home.status_code == 200 and "Your models" in home.text and 'class="on"' in home.text
+    for needle in ("qwen-test", "gateway config", "Qwen2.5 0.5B Instruct", "Gemma 3 4B Instruct", "Your own GGUF model", "Deploy"):
+        assert needle in home.text, needle
+    assert "deployed as" in home.text and "bobs-model" in home.text
+    # one big sortable table: quality and speed bars, what each needs, and what it costs to keep running
+    for needle in ("Which model should I pick?", "Just trying it, or simple tasks", 'id="catalog"', "click a column to sort", "data-sort",
+                   "Quality", "Speed", "Memory", "Download", "$/day", "$/month", "Good for", "Licence", "words/s", "thinking mode",
+                   "Deploy a custom model", "Cost estimates:", "starting…", ">ready<", "dapp model deploy ID", 'id="filter"'):
+        assert needle in home.text, needle
+    table = home.text[home.text.index('id="catalog"'):]
+    assert table.count("Deploy</button>") == len(CATALOG) and 'class="card"' not in home.text      # a row per model, no boxes
+    row = table[table.index("Qwen2.5 0.5B Instruct"):table.index("Llama 3.2 1B Instruct")]
+    assert "1.5Gi" in row and "$0.61" in row and "0.46 GB" in row and "Apache-2.0" in row and "Fast &amp; light" in table
+    page = c.get("/models/deploy", params={"id": "qwen2.5-0.5b"})                    # the Customize menu holds every setting
+    assert page.status_code == 200 and "Customize" in page.text and "Reset to defaults" in page.text
+    for label in ("Quantization", "Compute", "CPU request", "CPU limit", "Memory request", "Memory limit", "Disk (Gi)",
+                  "Context size", "Parallel requests", "Threads", "Batch size", "Micro-batch size", "Flash attention",
+                  "KV cache type (keys)", "KV cache type (values)", "Max tokens per reply", "Reasoning / thinking",
+                  "Jinja chat template", "Context shift", "Continuous batching", "Request timeout", "Temperature", "Top-k",
+                  "Top-p", "Min-p", "Repeat penalty"):
+        assert label in page.text, label
+    assert 'value="2"' in page.text and "Q8_0 (0.63 GB)" in page.text and 'name="name" type="text" value="qwen2.5-0.5b"' in page.text
+    for field, value in (("ctx", "8192"), ("memory_limit", "1.5Gi"), ("temperature", "0.7"), ("top_k", "20"), ("top_p", "0.8"),
+                         ("repeat_penalty", "1.1"), ("min_p", "")):                        # this model's own defaults are prefilled
+        assert f'name="{field}" type="{"text" if field == "memory_limit" else "number"}" value="{value}"' in page.text, field
+    assert "Defaults for Qwen2.5 0.5B Instruct" in page.text and "KV cache for a 8192-token context" in page.text
+    assert "Estimated running cost" in page.text and 'id="e-day"' in page.text and "const E =" in page.text      # live cost panel
+    assert '"Q8_0": 0.63' in page.text and "Quality is a rough guide" in page.text
+    assert "Sampling from its generation_config.json" in page.text
+    other = c.get("/models/deploy", params={"id": "phi3.5-mini"}).text                    # another model: other numbers and reasons
+    assert 'name="ctx" type="number" value="4096"' in other and 'name="memory_limit" type="text" value="5Gi"' in other
+    assert 'name="temperature" type="number" value=""' in other and "llama.cpp&#39;s own defaults" in other
+    gemma = c.get("/models/deploy", params={"id": "gemma3-4b"}).text
+    assert 'name="temperature" type="number" value="1.0"' in gemma and 'name="top_k" type="number" value="64"' in gemma
+    custom = c.get("/models/deploy", params={"id": "custom"}).text
+    assert 'name="temperature" type="number" value=""' in custom and "general defaults" in custom
+    assert c.get("/models/deploy", params={"id": "nope"}).status_code == 404
+    assert 'name="hf"' in c.get("/models/deploy", params={"id": "custom"}).text
+    csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
+
+    form = {"csrf": csrf, "model_id": "qwen2.5-0.5b", "name": "my-qwen", "quant": "Q8_0", "compute": "engineering-compute",
+            "cpu": "1", "cpu_limit": "3", "memory": "1Gi", "memory_limit": "2Gi", "disk_gi": "3", "ctx": "8192", "parallel": "2",
+            "threads": "3", "batch": "1024", "ubatch": "256", "flash_attn": "on", "cache_type_k": "q8_0", "cache_type_v": "q8_0",
+            "max_tokens": "300", "reasoning": "off", "jinja": "on", "context_shift": "on", "cont_batching": "on",
+            "timeout_s": "900", "temperature": "0.3", "top_k": "", "top_p": "0.9", "min_p": "", "repeat_penalty": "1.1"}
+    done = c.post("/models/deploy", data=form)
+    assert done.status_code == 200 and "Deploying my-qwen" in done.text and "Use it" in done.text
+    assert "Starting." in done.text and "location.reload()" in done.text                    # a new model is "starting" until ready
+    assert 'href="https://x.dataos.cloud/chatbot/?model=my-qwen"' in done.text and "Try it in the DataOS chatbot" in done.text
+    call = next(x for x in fake.calls if x[0] == "deploy_model")
+    _, name, source, compute, dataplane, env, cpu_limit, mem_limit = call
+    assert (name, source, compute, dataplane) == ("my-qwen", "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q8_0", "engineering-compute", "poldp01")
+    assert (cpu_limit, mem_limit) == ("3", "2Gi")
+    assert env["LLAMA_ARG_CTX_SIZE"] == "8192" and env["LLAMA_ARG_N_PARALLEL"] == "2" and env["LLAMA_ARG_FLASH_ATTN"] == "on"
+    assert env["LLAMA_ARG_CACHE_TYPE_K"] == "q8_0" and env["LLAMA_ARG_N_PREDICT"] == "300" and env["LLAMA_ARG_REASONING"] == "off"
+    assert env["LLAMA_ARG_TEMPERATURE"] == "0.3" and env["LLAMA_ARG_TOP_P"] == "0.9" and env["LLAMA_ARG_REPEAT_PENALTY"] == "1.1"
+    assert "LLAMA_ARG_TOP_K" not in env and "LLAMA_ARG_MIN_P" not in env                  # empty boxes stay llama.cpp's own
+
+    for bad, text in (({"name": "gpt-4o"}, "provider"), ({"memory_limit": "300Mi", "memory": "256Mi"}, "too small to load"),
+                      ({"quant": "Q2_Z"}, "offers: Q4_K_M, Q5_K_M, Q8_0"), ({"ctx": "many"}, "not a number"),
+                      ({"cpu_limit": "20"}, "8 cores"), ({"name": "taken"}, "already exists")):
+        r = c.post("/models/deploy", data={**form, **bad})
+        assert r.status_code == 400 and text in r.text, (bad, r.text[:200])
+        assert 'name="ctx"' in r.text and "Customize" in r.text and "<details class=\"customize\" open>" in r.text   # form kept, menu open
+    assert c.post("/models/deploy", data={**form, "csrf": "bad"}).status_code == 403
+
+    detail = c.get("/models/qwen-test")                                                   # use it: key, curl, python, usage
+    assert detail.status_code == 200
+    for needle in ("Create a dapp key for me", 'curl -s https://x.dataos.cloud/dapp-gateway/openai/v1/chat/completions',
+                   '"model": "qwen-test"', "OpenAI(base_url=", "Usage by app", "Delete model", "Server settings", "Ready.",
+                   'Bearer $DAPP_KEY', 'api_key=os.environ["DAPP_KEY"]', 'href="https://x.dataos.cloud/chatbot/?model=qwen-test"',
+                   "Try it in the DataOS chatbot", "reserved, up to"):
+        assert needle in detail.text, needle
+    assert "OPENAI_API_KEY" not in detail.text and "location.reload()" not in detail.text      # a ready model doesn't reload
+    assert "Starting." in c.get("/models/bobs-model").text and "location.reload()" in c.get("/models/bobs-model").text
+    assert "Delete model" not in c.get("/models/bobs-model").text and "Delete model" not in c.get("/models/small").text
+    assert "gateway's own configuration" in c.get("/models/small").text
+    assert c.get("/models/nothing").status_code == 404
+
+    made = c.post("/models/qwen-test/key", data={"csrf": csrf}, follow_redirects=False)
+    created = urlparse(made.headers["location"]).query
+    shown = c.get("/models/qwen-test?" + created)
+    assert "dapp_PERSONALKEY" in shown.text and "export DAPP_KEY=dapp_PERSONALKEY" in shown.text
+    assert "dapp_PERSONALKEY" not in c.get("/models/qwen-test?" + created).text           # shown once
+
+    assert "Type qwen-test to confirm" in c.post("/models/qwen-test/delete", data={"csrf": csrf, "confirm": "no"}).text
+    gone = c.post("/models/qwen-test/delete", data={"csrf": csrf, "confirm": "qwen-test"})
+    assert "Deleted qwen-test" in gone.text
+    time.sleep(0.2)                                                                      # the Volume goes in the background
+    assert ("delete_model", "qwen-test") in fake.calls and ("delete_volume", "model-qwen-test-data") in fake.calls
+
+
+def test_claude_code_tab_deploy_token_stop_and_delete(monkeypatch):
+    import re
+
+    fake = FakePlatform()
+    c = signed_in_with_fakes(monkeypatch, platform_factory=lambda s, t=None: fake)
+    page = c.get("/claude")                                                  # nothing deployed yet: the deploy form
+    assert page.status_code == 200 and 'class="on"' in page.text and ">Claude Code<" in page.text
+    for needle in ("Deploy your Claude Code", "Deploy my Claude Code", "claude-alice", "Customize", "CPU request", "Memory limit", "Compute",
+                   "Estimated running cost", 'id="e-day"', "claude setup-token", "Stay signed in to Claude", "Everyone's Claude Code",
+                   "claude-bob", "only its owner can open it", "250m", "Stop</b> it when you're not using it"):
+        assert needle in page.text, needle
+    assert "Stop (keep my files)" not in page.text and "Delete model" not in page.text
+    csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
+
+    token = "sk-ant-oat01-" + "A1b2C3d4" * 7
+    form = {"csrf": csrf, "compute": "engineering-compute", "cpu": "500m", "cpu_limit": "3", "memory": "1Gi", "memory_limit": "3Gi",
+            "token": token + "\n" + "Zz9-_Yy8"}
+    bad = c.post("/claude/deploy", data={**form, "memory": "100Mi", "memory_limit": "300Mi"})   # bad resources: the form comes back with the reason
+    assert bad.status_code == 400 and "at least 512Mi" in bad.text and "<details class=\"customize\" open>" in bad.text
+    assert c.post("/claude/deploy", data={**form, "token": "short"}).status_code == 400
+    assert c.post("/claude/deploy", data={**form, "csrf": "bad"}).status_code == 403
+
+    done = c.post("/claude/deploy", data=form)
+    assert "Deploying your Claude Code" in done.text and fake.calls[-1] == ("deploy_claude", "500m", "3", "1Gi", "3Gi", "engineering-compute", True)
+    assert token not in done.text and "Zz9-_Yy8" not in done.text                          # the token is never echoed back
+    assert "starting…" in done.text and "location.reload()" in done.text and "signed in to Claude" in done.text
+    assert "Stop (keep my files)" in done.text and "Delete" in done.text
+
+    fake.claude["state"] = "running"
+    run = c.get("/claude").text
+    assert 'href="https://x.dataos.cloud/claude-alice/"' in run and "Open Claude Code" in run and "location.reload()" not in run
+
+    saved = c.post("/claude/token", data={"csrf": csrf, "token": token})
+    assert "Token saved" in saved.text and "restarts" in saved.text and token not in saved.text and fake.calls[-1] == ("claude_token", True)
+    assert "paste the token" in c.post("/claude/token", data={"csrf": csrf, "token": ""}).text or "Claude token" in c.post("/claude/token", data={"csrf": csrf, "token": "x"}).text
+    assert c.post("/claude/stop", data={"csrf": csrf}).status_code == 200 and fake.calls[-1] == ("stop_claude",)
+    assert "Deploy my Claude Code" in c.get("/claude").text and "already stored" in c.get("/claude").text                 # stopped: deploy again
+    fake.claude = {"exists": True, "state": "running", "token": True}
+    assert "Type claude-alice to confirm" in c.post("/claude/delete", data={"csrf": csrf, "confirm": "no"}).text
+    assert "Deleted, with its token" in c.post("/claude/delete", data={"csrf": csrf, "confirm": "claude-alice"}).text
+    assert fake.calls[-1] == ("delete_claude",)
+
+
+def test_the_nav_marks_the_current_section_with_or_without_the_root_path():
+    from fastapi import Request
+
+    from dapp_dashboard.app import TEMPLATES
+
+    def on(path, root="/dapp"):
+        scope = {"type": "http", "method": "GET", "path": path, "headers": [], "query_string": b"", "root_path": root}
+        page = TEMPLATES.env.from_string('{% extends "base.html" %}{% block body %}x{% endblock %}').render(
+            request=Request(scope), s=type("S", (), {"user_id": "alice", "tenant": "t", "csrf": "t"})(), fqdn="x", flash=None, error=None)
+        import re
+        return re.findall(r'<a href="[^"]*" class="on">([^<]+)</a>', page)
+
+    for path in ("/dapp/claude", "/claude"):                       # the server may or may not put the root path in front
+        assert on(path) == ["Claude Code"], path
+    assert on("/dapp/models/qwen-test") == ["Models"] and on("/models") == ["Models"]
+    assert on("/dapp/") == ["Apps"] and on("/dapp") == ["Apps"] and on("/") == ["Apps"]
+    assert on("/dapp/apps/claude-code") == ["Apps"] and on("/dapp/apps/models-bot?tab=llm") == ["Apps"]     # an app named like a section
+    assert on("/storage/object", root="") == ["Storage"] and on("/keys", root="") == ["Keys"]

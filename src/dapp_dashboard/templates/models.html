@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Models · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% macro dots(n, total=5) -%}<span class="dots">{{ '●' * n }}<i>{{ '○' * (total - n) }}</i></span>{%- endmacro %}
+{% block body %}
+<h1>Models</h1>
+<p class="sub">Small language models that run on DataOS CPUs: private, reached through the gateway by name, metered like any model.
+Deploy one, try it in the chatbot, create a key, and call it with the OpenAI API. Prompts never leave DataOS.
+From a terminal: <code>dapp model catalog</code>, <code>dapp model deploy ID</code>.</p>
+
+{% if models_error %}<div class="flash err">The gateway isn't reachable: {{ models_error }}</div>{% endif %}
+
+<h2>Your models</h2>
+<div class="panel">
+{% if rows %}
+<table><thead><tr><th>Model</th><th>State</th><th>Weights</th><th class="num">≈ cost / day</th><th>Owner</th><th></th></tr></thead><tbody>
+{% for m in rows %}
+<tr><td><a href="{{ root }}/models/{{ m.name }}"><b>{{ m.name }}</b></a></td>
+  <td><span class="pill {{ {'ready':'ok','failed':'bad'}.get(m.phase, 'warn') }}" title="{{ 'Loaded and answering' if m.phase == 'ready' else ('The pod is not running: see its app page' if m.phase == 'failed' else 'Downloading or loading the model; it answers in a minute or two') }}">{{ 'starting…' if m.phase == 'starting' else m.phase }}</span></td>
+  <td class="muted">{{ m.repo or '–' }}</td>
+  <td class="num">{{ m.est.day|money if m.est else '–' }}</td>
+  <td>{% if m.source == 'config' %}<span class="pill">gateway config</span>{% elif m.mine %}you{% else %}{{ m.owner }}{% endif %}</td>
+  <td style="white-space:nowrap"><a href="{{ root }}/models/{{ m.name }}">Use it</a></td></tr>
+{% endfor %}
+</tbody></table>
+{% else %}<div class="empty">No model yet. Pick one below and deploy it.</div>{% endif %}
+</div>
+
+<h2>Which model should I pick?</h2>
+<div class="panel">
+<table><tbody>
+{% for title, c, why in picks %}
+<tr><td style="width:26%"><b>{{ title }}</b></td><td style="width:22%"><a href="{{ root }}/models/deploy?id={{ c.e.id|urlencode }}">{{ c.e.title }}</a></td>
+  <td class="muted">{{ why }}</td>
+  <td class="num" style="white-space:nowrap">≈ <b>{{ c.est.day|money }}</b>/day · ~{{ c.est.words_per_s|round|int }} words/s</td>
+  <td style="width:1%"><a href="{{ root }}/models/deploy?id={{ c.e.id|urlencode }}"><button class="primary">Deploy</button></a></td></tr>
+{% endfor %}
+</tbody></table>
+</div>
+
+<div class="row" style="justify-content:space-between;align-items:end;margin-top:28px">
+  <h2 style="margin:0">All models <span class="muted" style="font-weight:400;font-size:12px">· click a column to sort</span></h2>
+  <label style="flex-direction:row;align-items:center;gap:8px"><span>Filter</span><input id="filter" placeholder="name, use or licence" size="26"></label>
+</div>
+<div class="panel" style="margin-top:10px;padding:0">
+<table id="catalog">
+  <thead><tr>
+    <th data-sort>Model</th><th data-sort>Size</th><th data-sort>Tier</th><th data-sort>Quality</th><th data-sort>Speed</th>
+    <th data-sort title="Memory the pod is given">Memory</th><th data-sort>CPU</th><th data-sort title="Size of the model file">Download</th>
+    <th data-sort title="Estimated, always on">$/day</th><th data-sort>$/month</th><th data-sort>Good for</th><th data-sort>Licence</th><th></th>
+  </tr></thead>
+  <tbody>
+  {% for c in cards %}
+  <tr data-text="{{ (c.e.title ~ ' ' ~ c.e.id ~ ' ' ~ c.traits|join(' ') ~ ' ' ~ c.e.license ~ ' ' ~ c.tier)|lower }}">
+    <td data-v="{{ c.e.title }}"><b>{{ c.e.title }}</b>
+      {% if deployed.get(c.e.hf|upper) %}<div class="muted" style="font-size:11.5px">deployed as <a href="{{ root }}/models/{{ deployed[c.e.hf|upper] }}">{{ deployed[c.e.hf|upper] }}</a></div>{% endif %}</td>
+    <td data-v="{{ c.e.size_gb }}"><span class="pill info">{{ c.e.params }}</span></td>
+    <td data-v="{{ {'light':1,'balanced':2,'capable':3}[c.tier] }}">{{ {'light':'Fast & light','balanced':'Balanced','capable':'Most capable'}[c.tier] }}</td>
+    <td data-v="{{ c.quality }}" title="A rough guide, not a benchmark">{{ dots(c.quality) }}</td>
+    <td data-v="{{ c.est.words_per_s }}">{{ dots(c.speed) }} <span class="muted" style="font-size:11.5px">~{{ c.est.words_per_s|round|int }} words/s</span></td>
+    <td data-v="{{ c.memory|replace('Gi','') }}">{{ c.memory }}</td>
+    <td data-v="{{ c.cpu }}">{{ c.cpu }}</td>
+    <td data-v="{{ c.e.size_gb }}" style="white-space:nowrap">{{ c.e.size_gb }} GB</td>
+    <td data-v="{{ c.est.day }}" class="num"><b>{{ c.est.day|money }}</b></td>
+    <td data-v="{{ c.est.month }}" class="num">{{ c.est.month|money }}</td>
+    <td data-v="{{ c.traits[0] }}">{% for t in c.traits %}<span class="chip">{{ t }}</span> {% endfor %}</td>
+    <td data-v="{{ c.e.license }}" class="muted" style="font-size:12px">{{ c.e.license }}</td>
+    <td style="white-space:nowrap"><a href="{{ root }}/models/deploy?id={{ c.e.id|urlencode }}"><button class="primary">Deploy</button></a>
+      <a href="{{ c.e.url }}" target="_blank" rel="noopener" class="muted" style="font-size:12px" title="Hugging Face">HF ↗</a></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+  <tfoot><tr><td colspan="12"><b>Your own GGUF model</b> <span class="muted">· any repo on Hugging Face that llama.cpp can load, e.g. <code>Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M</code></span></td>
+    <td><a href="{{ root }}/models/deploy?id=custom"><button>Deploy a custom model</button></a></td></tr></tfoot>
+</table>
+</div>
+<p class="muted" style="font-size:12.5px;margin:10px 0 0">Bigger models answer better but write more slowly and cost more to keep running. Quality is a rough guide, not a benchmark:
+try one on your own questions (the chatbot's model drop-down shows every model you deploy).</p>
+
+<p class="muted" style="margin-top:14px;font-size:12px">Cost estimates: {{ rates.currency }}{{ rates.cpu_hour }} per CPU-hour and {{ rates.currency }}{{ rates.gb_hour }} per GB of memory per hour reserved,
+disk {{ rates.currency }}{{ rates.disk_gb_month }} per GB-month. DataOS doesn't bill these apps here, so they are list-price assumptions (the operator can set their own).
+A model costs its reservation even when idle: delete the ones you don't use. Speeds are for generating on 2 to 4 CPU cores (about 14 ÷ file size in GB tokens per second, measured).</p>
+
+<script>
+(function () {
+  const table = document.getElementById('catalog'), body = table.tBodies[0];
+  table.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => {
+    const i = th.cellIndex, dir = th.dataset.dir === 'asc' ? 'desc' : 'asc';
+    table.querySelectorAll('th').forEach(h => { delete h.dataset.dir; h.textContent = h.textContent.replace(/ [▲▼]$/, ''); });
+    th.dataset.dir = dir; th.textContent += dir === 'asc' ? ' ▲' : ' ▼';
+    const rows = [...body.rows].sort((a, b) => {
+      const x = a.cells[i].dataset.v || '', y = b.cells[i].dataset.v || '', nx = parseFloat(x), ny = parseFloat(y);
+      const c = (!isNaN(nx) && !isNaN(ny)) ? nx - ny : x.localeCompare(y);
+      return dir === 'asc' ? c : -c;
+    });
+    rows.forEach(r => body.appendChild(r));
+  }));
+  document.getElementById('filter').addEventListener('input', e => {
+    const q = e.target.value.trim().toLowerCase();
+    [...body.rows].forEach(r => { r.style.display = !q || r.dataset.text.includes(q) ? '' : 'none'; });
+  });
+})();
+</script>
+{% endblock %}

@@ -30,6 +30,8 @@
 <table>
   <thead><tr><th>App</th><th>Status</th><th>Owner</th><th>Access</th>
     {% if has_prom %}<th class="num">CPU (cores)</th><th class="num">Memory</th>{% endif %}
+    <th title="DataOS secrets mounted as environment variables (names only; values are never shown)">Secrets</th>
+    <th title="Volumes mounted into the app: the data that outlives it">Volumes</th>
     <th class="num">LLM tokens</th><th>URL</th></tr></thead>
   <tbody>
   {% for a in apps %}
@@ -41,6 +43,8 @@
     {% set ac = a.access %}
     <td style="white-space:nowrap">{% if ac %}{% if ac.mode == 'login' %}{% if ac.everyone %}<span class="pill warn" title="Anyone signed in to DataOS can open it">everyone</span>{% else %}{{ ac.people }} {{ 'person' if ac.people == 1 else 'people' }}{% if ac.roles %} + {{ ac.roles }} {{ 'role' if ac.roles == 1 else 'roles' }}{% endif %}{% endif %}{% elif ac.mode == 'public' %}<span class="pill warn" title="No sign-in in front of the app">public</span>{% else %}<span class="muted">DataOS policy</span>{% endif %} · {% endif %}<a href="{{ request.scope.root_path }}/apps/{{ a.name }}?tab=access">Manage</a>{% if pend.get(a.name) %} <a class="pill warn" href="{{ request.scope.root_path }}/apps/{{ a.name }}?tab=access" title="Waiting for your answer">{{ pend[a.name] }} request{{ 's' if pend[a.name] > 1 }}</a>{% endif %}</td>
     {% if has_prom %}<td class="num">{{ c.cpu_cores|num(3) if c and not c.error else '–' }}</td><td class="num">{{ c.memory_bytes|bytes if c and not c.error else '–' }}</td>{% endif %}
+    <td style="max-width:240px">{% for x in a.secrets or [] %}<a href="{{ request.scope.root_path }}/apps/{{ a.name }}?tab=secrets" class="chip" style="margin:1px 2px 1px 0;text-decoration:none" title="{{ x }}">{{ x|truncate(28, true, '…') }}</a>{% else %}<span class="muted">–</span>{% endfor %}</td>
+    <td>{% for v in a.volumes or [] %}<span class="chip" style="margin:1px 2px 1px 0" title="mounted at {{ v.directory }}{{ ' (read-only)' if v.readOnly }}">{{ v.id }} <span class="muted">{{ v.directory }}</span></span>{% endfor %}{% if a.disk %}<span class="chip" title="a disk that belongs to this app and goes with it">disk {{ a.disk }}</span>{% endif %}{% if not a.volumes and not a.disk %}<span class="muted">none: files are lost on restart</span>{% endif %}</td>
     <td class="num">{{ (u.input_tokens + u.output_tokens)|num if u else '–' }}</td>
     <td>{% if a.url %}<a href="{{ a.url }}" target="_blank" rel="noopener">open</a>{% endif %}</td>
   </tr>

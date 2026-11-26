@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}Claude Code · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% macro field(label, name, hint='') -%}
+<label>{{ label }}<input name="{{ name }}" value="{{ form.get(name, '') }}">{% if hint %}<small>{{ hint }}</small>{% endif %}</label>
+{%- endmacro %}
+{% block body %}
+<h1>Claude Code</h1>
+<p class="sub">Your own Claude Code in the browser: ask it to build an app, a chatbot or a dashboard and it deploys it on DataOS <b>as you</b>.
+Private to you: its pod runs as you, nobody else can read its files or your Claude sign-in. Your code and conversations are saved in your own
+Storage, so you can stop it and come back to them.</p>
+
+{% if error_text %}<div class="flash err">{{ error_text }}</div>{% endif %}
+{% if mine.error %}<div class="flash err">Couldn't check your Claude Code: {{ mine.error }}</div>{% endif %}
+
+{% if mine.exists %}
+  {% set running = mine.state == 'running' %}
+  <h2>Your Claude Code</h2>
+  <div class="panel">
+    <div class="row" style="align-items:center;margin-bottom:10px">
+      <b>{{ mine.app }}</b>
+      <span class="pill {{ 'ok' if running else ('bad' if mine.state == 'failed' else 'warn') }}">{{ 'running' if running else ('failed' if mine.state == 'failed' else 'starting…') }}</span>
+      {% if mine.token %}<span class="pill ok" title="A Claude token is stored: you stay signed in to Claude through restarts">signed in to Claude</span>
+      {% else %}<span class="pill warn" title="No token: you sign in to Claude in the terminal after every restart">no token</span>{% endif %}
+    </div>
+    {% if running %}
+      <div class="row"><a href="{{ mine.url }}" target="_blank" rel="noopener"><button class="primary">Open Claude Code ↗</button></a>
+        <span class="muted" style="font-size:12px;align-self:center">{{ mine.url }} · only you can open it{% if not mine.token %}. First time: sign in to Claude in the terminal (<code>/login</code>){% endif %}</span></div>
+    {% elif mine.state == 'failed' %}
+      <div class="state-big" style="border-color:var(--bad);margin:0"><b>The pod is not running.</b> See <a href="{{ root }}/apps/{{ mine.app }}?tab=logs">its logs</a>.</div>
+    {% else %}
+      <div class="state-big" style="border-color:var(--warn);margin:0"><b>Starting.</b> This page refreshes by itself; the button appears when it is running (a minute or two).</div>
+    {% endif %}
+    {% if live.est %}<p class="muted" style="margin:12px 0 0;font-size:12.5px">Reserves {{ live.req.cpu }} CPU and {{ live.req.memory }} memory (up to {{ live.lim.cpu }} and {{ live.lim.memory }}):
+      about <b>{{ live.est.day|money }}/day</b> ({{ live.est.month|money }}/month) while it exists, used or not. <a href="{{ root }}/apps/{{ mine.app }}">App page</a> (logs, resources).</p>{% endif %}
+  </div>
+
+  <div class="row" style="margin-top:12px">
+    <form method="post" action="{{ root }}/claude/stop" onsubmit="return confirm('Stop your Claude Code? The pod goes away and stops costing; your files, chats and token are kept.')">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}"><button>Stop (keep my files)</button></form>
+    <span class="muted" style="font-size:12px;align-self:center">Stopping removes the pod, so it stops costing anything. Deploy again later: your workspace and conversations come back.</span>
+  </div>
+{% else %}
+  <h2>Deploy your Claude Code</h2>
+  <form method="post" action="{{ root }}/claude/deploy">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <div class="panel">
+      <p style="margin-top:0">One click starts a private Claude Code as <b>{{ mine.app }}</b>
+        {% if mine.token %}(your Claude token is already stored, so you will be signed in){% else %}(optionally paste your Claude token below so you stay signed in){% endif %}.
+        It starts in a minute or two and restores your files and conversations if you had it before.</p>
+      <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted);max-width:560px">Claude token <span style="font-weight:400">(optional; from <code>claude setup-token</code>, needs a Claude subscription)</span>
+        <input type="password" name="token" autocomplete="off" spellcheck="false" placeholder="{{ 'a token is already stored; paste a new one to replace it' if mine.token else 'paste it here once' }}">
+        <small style="color:var(--muted)">It is stored as a DataOS secret that only your instance reads, and never shown again. Without it you sign in to Claude in the terminal after every restart.</small></label>
+    </div>
+
+    {% if est %}
+    <div class="panel" id="estimate">
+      <h3 style="margin:0 0 10px">Estimated running cost <span class="muted" style="font-weight:400;font-size:12px">· while it is deployed, used or not</span></h3>
+      <div class="kpis" style="margin-bottom:8px">
+        <div class="kpi"><div class="label">Per day</div><div class="value" id="e-day">{{ est.day|money }}</div></div>
+        <div class="kpi"><div class="label">Per month</div><div class="value" id="e-month">{{ est.month|money }}</div></div>
+        <div class="kpi"><div class="label">At most (full limits)</div><div class="value" id="e-max">{{ est.day_max|money }}<span style="font-size:12px;font-weight:400">/day</span></div></div>
+      </div>
+      <p class="muted" style="margin:0;font-size:12px">Assumes {{ rates.currency }}{{ rates.cpu_hour }} per CPU-hour and {{ rates.currency }}{{ rates.gb_hour }} per GB-hour of memory, on what the pod reserves.
+        DataOS doesn't bill these apps here, so it is a comparison, not a bill. <b>Stop</b> it when you're not using it: that costs nothing and keeps your files.</p>
+    </div>
+    {% endif %}
+
+    <details class="customize" {{ 'open' if error_text }}>
+      <summary>Customize</summary>
+      <h3>DataOS resources</h3>
+      <div class="fields">
+        {{ field('Compute', 'compute', 'The compute resource it runs on; you need Can Use on it') }}
+        {{ field('CPU request', 'cpu', 'Reserved: 250m, 500m, 1') }}
+        {{ field('CPU limit', 'cpu_limit', 'At most this many cores (8 max); builds use the burst') }}
+        {{ field('Memory request', 'memory', 'Reserved: 1Gi, 2Gi (at least 512Mi)') }}
+        {{ field('Memory limit', 'memory_limit', 'Claude Code itself needs about 350 Mi; more for big installs') }}
+      </div>
+    </details>
+    <div class="row" style="align-items:center"><button class="primary">Deploy my Claude Code</button></div>
+  </form>
+{% endif %}
+
+<h2>Stay signed in to Claude</h2>
+<div class="panel">
+  <p style="margin-top:0">DataOS replaces pods now and then, and every deploy does too. Without a token you sign in to Claude in the terminal again each time.
+  With one you never do. Get it once on your own computer (you need a Claude subscription):</p>
+<pre>claude setup-token     # prints a token valid for a year</pre>
+  <form method="post" action="{{ root }}/claude/token" class="row">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <label style="flex:1;min-width:280px">Paste the token<input type="password" name="token" autocomplete="off" spellcheck="false" style="width:100%" placeholder="{{ 'a token is stored; paste a new one to replace it' if mine.token else 'not set yet' }}"></label>
+    <button class="primary">Save token</button>
+  </form>
+  <p class="muted" style="margin:10px 0 0;font-size:12px">Kept as the DataOS secret <code>dapp-{{ mine.app }}-anthropic</code>, readable only by your instance, never shown again.
+    {% if mine.exists %}Saving restarts your Claude Code to use it.{% endif %} Don't paste it anywhere else (chats, tickets).</p>
+</div>
+
+<h2>Everyone's Claude Code</h2>
+<div class="panel">
+{% if everyone_error %}<div class="muted">Couldn't list them: {{ everyone_error }}</div>
+{% elif everyone %}
+<table><thead><tr><th>Instance</th><th>Owner</th><th>State</th><th></th></tr></thead><tbody>
+{% for a in everyone %}
+<tr><td>{{ a.name }}</td><td>{{ a.owner }}{% if a.owner == s.user_id %} <span class="pill ok">you</span>{% endif %}</td>
+  <td><span class="pill {{ {'running':'ok','failed':'bad'}.get(a.state, 'warn') }}">{{ a.state }}</span></td>
+  <td>{% if a.owner == s.user_id %}<a href="{{ root }}/apps/{{ a.name }}">App page</a>{% else %}<span class="muted" style="font-size:12px">only its owner can open it</span>{% endif %}</td></tr>
+{% endfor %}
+</tbody></table>
+{% else %}<div class="empty">Nobody has deployed one yet.</div>{% endif %}
+</div>
+
+{% if mine.exists %}
+<h2>Delete</h2>
+<div class="panel">
+  <p style="margin-top:0" class="muted">Deletes the app, its token and its sign-in. Your code and conversations stay in your Storage (<code>workspace</code>, <code>claude-sessions</code>); delete them there if you want them gone too.</p>
+  <form class="row" method="post" action="{{ root }}/claude/delete" onsubmit="return confirm('Delete your Claude Code and its token?')">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <label><span>Type <code>{{ mine.app }}</code> to confirm</span><input name="confirm" size="30" autocomplete="off"></label>
+    <button class="danger">Delete</button>
+  </form>
+</div>
+{% endif %}
+
+{% if mine.exists and mine.state != 'running' and mine.state != 'failed' %}<script>setTimeout(function () { location.reload(); }, 10000);</script>{% endif %}
+{% if not mine.exists and est %}
+<script>
+(function () {
+  const R = {{ rates|tojson }}, cur = R.currency;
+  const f = n => document.querySelector('[name="' + n + '"]');
+  const cpu = v => { v = String(v || '').trim(); return v.endsWith('m') ? parseFloat(v) / 1000 : parseFloat(v); };
+  const mem = v => { v = String(v || '').trim(); return v.endsWith('Gi') ? parseFloat(v) : v.endsWith('Mi') ? parseFloat(v) / 1024 : NaN; };
+  const money = x => !isFinite(x) ? '–' : x < 0.01 ? '<' + cur + '0.01' : cur + (x < 10 ? x.toFixed(2) : Math.round(x).toLocaleString());
+  const set = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+  function update() {
+    const hour = cpu(f('cpu').value) * R.cpu_hour + mem(f('memory').value) * R.gb_hour;
+    const top = cpu(f('cpu_limit').value) * R.cpu_hour + mem(f('memory_limit').value) * R.gb_hour;
+    set('e-day', money(hour * 24)); set('e-month', money(hour * 24 * 30));
+    set('e-max', money(top * 24) + '<span style="font-size:12px;font-weight:400">/day</span>');
+  }
+  ['cpu', 'cpu_limit', 'memory', 'memory_limit'].forEach(n => { const el = f(n); if (el) el.addEventListener('input', update); });
+  update();
+})();
+</script>
+{% endif %}
+{% endblock %}
