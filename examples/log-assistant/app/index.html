@@ -79,7 +79,11 @@ form.ask button:disabled{opacity:.5}
     <div class="icon">▦</div>
     <div><h1 id="rname">Loading…</h1><div class="desc" id="rdesc"></div></div>
     <div class="pick">
-      <select id="kind" title="Kind of resource"><option value="app">app</option><option value="service">service</option></select>
+      <select id="kind" title="Kind of resource (the ones that run pods, so have logs)">
+        <option value="app">app</option><option value="service">service</option><option value="vulcan">vulcan (data product)</option>
+        <option value="minerva">minerva</option><option value="lakehouse">lakehouse</option>
+        <option value="lakehouse-rustfs">lakehouse-rustfs</option><option value="nilus">nilus (pipeline)</option>
+        <option value="workflow">workflow</option><option value="worker">worker</option></select>
       <select id="resource" title="Resource"></select>
     </div>
   </div>
@@ -147,7 +151,7 @@ form.ask button:disabled{opacity:.5}
     $("resource").innerHTML = "<option>loading…</option>";
     try {
       const rows = await api(`/api/resources?kind=${S.kind}`);
-      $("resource").innerHTML = rows.map(r => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join("")
+      $("resource").innerHTML = rows.map(r => `<option value="${esc(r.name)}">${esc(r.name)}${r.owner ? " · " + esc(r.owner) : ""}</option>`).join("")
         || `<option value="">no ${S.kind}s you may watch</option>`;
       const want = new URLSearchParams(location.search).get("name");
       S.name = rows.find(r => r.name === want) ? want : (rows[0] && rows[0].name) || null;

@@ -21,7 +21,10 @@ from typing import Any
 
 import httpx
 
-DEFAULT_VERSIONS = {"app": "v1alpha", "nilus": "v1alpha", "service": "v2alpha", "workflow": "v2alpha", "worker": "v2alpha"}
+# the resource types that run pods (so have logs), and the version their log search answers to (tested live 2026-11-26 for app,
+# service, vulcan, minerva, lakehouse, lakehouse-rustfs). Compute, depot, secret, volume... run nothing and have no logs.
+DEFAULT_VERSIONS = {"app": "v1alpha", "service": "v2alpha", "vulcan": "v1alpha", "minerva": "v1alpha", "lakehouse": "v1alpha",
+                    "lakehouse-rustfs": "v1alpha", "nilus": "v1alpha", "workflow": "v2alpha", "worker": "v2alpha"}
 WINDOW_RE = re.compile(r"^(\d{1,4})([smhd])$")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 MAX_MESSAGE = 4000

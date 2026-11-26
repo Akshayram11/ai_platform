@@ -6,7 +6,9 @@ replaced pods included. It is reached only through the dapp gateway, like `immor
 `https://<host>/dapp-gateway/mcp/<tenant>/dapp-monitor`.
 
 ## Tools
-Every tool takes `kind`: `app` (default), `service`, `worker`, `workflow` or `nilus`.
+Every tool takes `kind`: `app` (default), `service`, `vulcan` (data products), `minerva` (query clusters), `lakehouse`,
+`lakehouse-rustfs`, `nilus` (pipelines), `workflow` or `worker`: the types that run pods. Compute, dataplane, depot, grant,
+secret, stack and volume run nothing, so they have no logs (Poros answers 404/500, search 0; checked live 2026-11-26).
 
 | Tool | What it answers | DataOS API |
 |---|---|---|
@@ -29,8 +31,17 @@ What the model sees is cleaned up:
 ## Whose eyes, and who may call
 - The pod runs as its owner (DataOS gives it `DATAOS_RUN_AS_USER` / `DATAOS_RUN_AS_APIKEY`), so it reads what the owner may read,
   no more.
-- `MONITOR_ALLOW` (env) narrows it: `"*"` = everything the owner owns (any kind), or a list like `chatbot, service:orders-api`
-  (a bare name is an app; another owner's resource can be listed if DataOS lets the owner read it).
+- `MONITOR_ALLOW` (env) decides what may be watched:
+  - `tenant` (deployed this way): **the owner** watches everything DataOS lets them read, the whole tenant for a tenant admin.
+    **Anyone else** watches only the resources they own themselves, plus `MONITOR_SHARE` (`"vulcan:orders-dp, app:chatbot"`).
+    Who is looking comes from the gateway (`x-dapp-user`: the person, or the person an app vouches for), so the owner's
+    rights are never lent to another person through the Log Assistant;
+  - `*`: only what the owner owns;
+  - a list `chatbot, service:orders-api` (a bare name is an app).
+- With several containers (lakehouse, vulcan), the stored search can't filter one container, so the log shipper's lines are
+  dropped from the answer afterwards (`note` says how many; `include_sidecars=true` keeps them).
+- Big resources write a lot (a lakehouse: ~150,000 lines an hour): one call returns at most 1000 lines, so search with a keyword
+  and a short window there.
 - The gateway decides who may call the tool (`dapp tool allow dapp-monitor <user> app:<name>`) and records every call; it
   reaches the server with `TOOL_TOKEN` and `x-dapp-caller`. Without the token the server answers 401.
 

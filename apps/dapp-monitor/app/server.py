@@ -8,8 +8,12 @@ Every tool takes kind: app (default), service, worker, workflow or nilus. All re
   log_summary   how many lines, errors and warnings in a window, and which pods wrote them.
 
 Whose eyes: the pod runs as its owner (DataOS gives it DATAOS_RUN_AS_USER / DATAOS_RUN_AS_APIKEY), so it can read what the
-owner can read, and no more. MONITOR_ALLOW narrows it: "*" = everything the owner owns, or a list like
-"chatbot, service:orders-api" (a bare name is an app; another owner's resource can be listed if DataOS lets the owner read it).
+owner can read, and no more. MONITOR_ALLOW narrows it:
+  "tenant"  the owner watches everything DataOS lets them read; anyone else (the gateway says who: x-dapp-user) only the
+            resources they own themselves, plus MONITOR_SHARE ("vulcan:orders-dp, app:chatbot"): the owner's rights are never
+            lent to another person;
+  "*"       only what the owner owns;
+  a list    "chatbot, service:orders-api" (a bare name is an app).
 The gateway decides who may call this tool (`dapp tool allow dapp-monitor ...`) and records every call; it reaches us with
 TOOL_TOKEN and x-dapp-caller. Without TOOL_TOKEN we answer nothing.
 """
@@ -24,7 +28,7 @@ import os
 
 import httpx
 import uvicorn
-from logsearch import LogSearchError, redact, search
+from logsearch import DEFAULT_VERSIONS, LogSearchError, redact, search
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
@@ -36,12 +40,13 @@ TENANT = os.environ.get("DATAOS_TENANT_ID", "")
 OWNER = os.environ.get("DATAOS_RUN_AS_USER", "")
 KEY = os.environ.get("DATAOS_RUN_AS_APIKEY", "")
 _caller: contextvars.ContextVar[str] = contextvars.ContextVar("caller", default="")
+_viewer: contextvars.ContextVar[str] = contextvars.ContextVar("viewer", default="")   # the person looking (x-dapp-user)
 
-KINDS = ("app", "service", "worker", "workflow", "nilus")
+KINDS = tuple(DEFAULT_VERSIONS)          # the types that run pods; compute, depot, secret, volume... have no logs
 
 mcp = MCPServer("dapp-monitor", instructions=(
-    "Watch DataOS resources: apps (kind='app', the default) and services (kind='service'), also workers, workflows and nilus "
-    "pipelines. list_resources: what you may look at. status: is it running, which pods. recent_logs: the running pods' last "
+    "Watch DataOS resources that run pods: kind app (default), service, vulcan (data products), minerva (query clusters), "
+    "lakehouse, lakehouse-rustfs, nilus (pipelines), workflow, worker. Compute, depot, secret, volume and grants have no logs. list_resources: what you may look at. status: is it running, which pods. recent_logs: the running pods' last "
     "lines (what is happening now). search_logs: stored logs over any time range, including pods that crashed or were replaced, "
     "by keyword ('error', 'timeout', '*') with a window (since='1h') or a range (start/end in ISO UTC like "
     "2026-11-26T16:00:00Z, or '2h ago'). log_summary: counts of errors and warnings first, to know where to look. Times are UTC. "
@@ -65,19 +70,41 @@ def _kind(kind: str) -> str:
     return k
 
 
-def allowed() -> set[tuple[str, str]] | None:
-    """What may be watched: None = everything the owner owns (any kind); else (kind, name) pairs from MONITOR_ALLOW
-    ("chatbot, service:orders-api"; a bare name is an app). LOGS_APPS is the older name of the same setting."""
+def _mode() -> str:
+    """MONITOR_ALLOW: "tenant" = everything DataOS lets the owner read (for the owner; others see their own, below);
+    "*" = what the owner owns; or a list "chatbot, service:orders-api" (a bare name is an app). LOGS_APPS: older name."""
     raw = (os.environ.get("MONITOR_ALLOW") or os.environ.get("LOGS_APPS") or "*").strip()
-    if raw in ("", "*"):
-        return None
+    return "tenant" if raw.lower() == "tenant" else ("*" if raw in ("", "*") else "list")
+
+
+def _pairs(raw: str) -> set[tuple[str, str]]:
     out = set()
-    for item in raw.split(","):
+    for item in (raw or "").split(","):
         item = item.strip()
-        if item:
+        if item and item != "*":
             kind, _, name = item.rpartition(":")
             out.add((kind or "app", name))
     return out
+
+
+def allowed() -> set[tuple[str, str]] | None:
+    """The listed (kind, name) pairs in list mode; None in the other modes."""
+    return _pairs(os.environ.get("MONITOR_ALLOW") or os.environ.get("LOGS_APPS") or "") if _mode() == "list" else None
+
+
+def shared() -> set[tuple[str, str]]:
+    """MONITOR_SHARE: resources anyone who may use this tool may watch, on top of their own (tenant mode)."""
+    return _pairs(os.environ.get("MONITOR_SHARE", ""))
+
+
+def viewer() -> str:
+    """Who is looking: the person the gateway (or the app, which the gateway vouches for) says, else the calling app."""
+    return (_viewer.get() or _caller.get() or "").removeprefix("users:id:")
+
+
+def is_owner_view() -> bool:
+    v = viewer()
+    return not v or v == OWNER          # no header: a direct test or the owner's own tools
 
 
 def _poros(kind: str, path: str = "", **params) -> httpx.Response:
@@ -85,8 +112,8 @@ def _poros(kind: str, path: str = "", **params) -> httpx.Response:
                      params=params, headers=_headers(), timeout=30)
 
 
-def _listed(kind: str) -> list[dict]:
-    r = _poros(kind, owner=OWNER)
+def _listed(kind: str, owner: str | None = OWNER) -> list[dict]:
+    r = _poros(kind, **({"owner": owner} if owner else {}))
     if not r.is_success:
         raise ToolError(f"could not list {kind}s: HTTP {r.status_code}")
     body = r.json()
@@ -94,10 +121,11 @@ def _listed(kind: str) -> list[dict]:
 
 
 def _check(name: str, kind: str) -> dict | None:
-    """May this be watched? With MONITOR_ALLOW: it must be listed. With '*': it must belong to the owner. Returns the
-    resource when it was fetched."""
-    allow = allowed()
-    if allow is not None:
+    """May the viewer watch this? list mode: it must be listed. "*": it must be the owner's. "tenant": the owner may watch
+    whatever DataOS lets them read; anyone else only what they own themselves, plus MONITOR_SHARE. Returns the resource
+    when it was fetched."""
+    mode, allow = _mode(), allowed()
+    if mode == "list":
         if (kind, name) not in allow:
             listed = ", ".join(f"{k}:{n}" for k, n in sorted(allow))
             raise ToolError(f"{kind} {name} is not one of the resources this server may watch: {listed}")
@@ -105,11 +133,16 @@ def _check(name: str, kind: str) -> dict | None:
     r = _poros(kind, name)
     if r.status_code == 404:
         raise ToolError(f"no {kind} {name}; call list_resources(kind='{kind}')")
+    if r.status_code in (401, 403):
+        raise ToolError(f"DataOS doesn't let this server read {kind} {name}")
     if not r.is_success:
         raise ToolError(f"could not read {kind} {name}: HTTP {r.status_code}")
     res = r.json()
-    if res.get("owner") != OWNER:
+    owner = res.get("owner")
+    if mode == "*" and owner != OWNER:
         raise ToolError(f"{kind} {name} is not a resource of {OWNER}; call list_resources")
+    if mode == "tenant" and not is_owner_view() and owner != viewer() and (kind, name) not in shared():
+        raise ToolError(f"{kind} {name} belongs to {owner}; you can watch your own resources here (call list_resources)")
     return res
 
 
@@ -143,19 +176,29 @@ def _container_for(name: str, kind: str, container: str | None, include_sidecars
 
 @mcp.tool()
 def list_resources(kind: str = "app") -> list[dict]:
-    """The resources of one kind that can be watched (kind: app, service, worker, workflow, nilus), with their state."""
+    """The resources of one kind that can be watched, with owner and state. kind: app, service, vulcan, minerva, lakehouse,
+    lakehouse-rustfs, nilus, workflow, worker."""
     kind = _kind(kind)
-    allow = allowed()
-    if allow is not None:
-        names = sorted(n for k, n in allow if k == kind)
+    allow, mode = allowed(), _mode()
+    if mode == "list":
         rows = []
-        for n in names:
+        for n in sorted(n for k, n in allow if k == kind):
             r = _poros(kind, n)
-            rows.append({"name": n, "kind": kind, "status": (r.json().get("status") if r.is_success else f"HTTP {r.status_code}"),
-                         "description": (r.json().get("description") or "") if r.is_success else ""})
+            body = r.json() if r.is_success else {}
+            rows.append({"name": n, "kind": kind, "owner": body.get("owner"),
+                         "status": body.get("status") if r.is_success else f"HTTP {r.status_code}",
+                         "description": body.get("description") or ""})
         return rows
-    return [{"name": a.get("name"), "kind": kind, "status": a.get("status"), "description": a.get("description") or ""}
-            for a in _listed(kind)]
+    if mode == "*":
+        listed = _listed(kind)
+    elif is_owner_view():
+        listed = _listed(kind, owner=None)                       # the whole tenant, as far as DataOS lets the owner read
+    else:
+        share = {n for k, n in shared() if k == kind}
+        listed = [a for a in _listed(kind, owner=None) if a.get("owner") == viewer() or a.get("name") in share]
+    return sorted(({"name": a.get("name"), "kind": kind, "owner": a.get("owner"), "status": a.get("status"),
+                    "description": a.get("description") or ""} for a in listed),
+                  key=lambda x: (x["owner"] != (OWNER if is_owner_view() else viewer()), x["name"] or ""))
 
 
 @mcp.tool()
@@ -231,13 +274,19 @@ def search_logs(name: str, kind: str = "app", query: str = "*", since: str | Non
     Returns total, and lines (time UTC, pod, container, stream, message), oldest first; credentials are masked."""
     kind = _kind(kind)
     _check(name, kind)
-    log.info("search_logs %s %s query=%r caller=%s", kind, name, query, _caller.get() or "?")
+    log.info("search_logs %s %s query=%r caller=%s viewer=%s", kind, name, query, _caller.get() or "?", viewer() or "?")
     target = _container_for(name, kind, container, include_sidecars)
     try:
         out = search(_base(), TENANT, _headers(), name, kind=kind, query=query, since=since, start=start, end=end,
                      stream=stream, pod=pod, container=target, limit=limit, offset=offset)
     except LogSearchError as e:
         raise ToolError(str(e)) from e
+    if not target and not include_sidecars and not container:      # several containers: keep only the resource's own lines
+        before = len(out["lines"])
+        out["lines"] = [x for x in out["lines"] if not is_sidecar(x.get("container") or "")]
+        out["returned"] = len(out["lines"])
+        if before != out["returned"]:
+            out["note"] = f"{before - out['returned']} lines of DataOS's log shipper left out (include_sidecars=true to see them)"
     out["container"] = target or "all"
     return out
 
@@ -287,10 +336,12 @@ def build():
                             "headers": [(b"content-type", b"application/json")]})
                 return await send({"type": "http.response.body", "body": body})
             token = _caller.set(headers.get("x-dapp-caller", ""))
+            vtoken = _viewer.set(headers.get("x-dapp-user", ""))
             try:
                 return await inner(scope, receive, send)
             finally:
                 _caller.reset(token)
+                _viewer.reset(vtoken)
         return await inner(scope, receive, send)
 
     return app

@@ -109,7 +109,7 @@ def server(monkeypatch):
     calls = []
 
     resources = {("app", "chatbot"): "alice", ("app", "dapp"): "alice", ("service", "orders-api"): "alice",
-                 ("service", "their-svc"): "bob"}
+                 ("service", "their-svc"): "bob", ("lakehouse", "lake1"): "rohit"}
 
     def poros(req: httpx.Request) -> httpx.Response:
         calls.append(req)
@@ -117,14 +117,18 @@ def server(monkeypatch):
         p = req.url.path
         if "/logs/search" in p:
             q = req.url.params["q"]
-            return httpx.Response(200, json={"data": {"total_hits": {"*": 40, "error": 3}.get(q, 0), "results": [
-                {"name": "pod-1", "containerName": "main", "time": "2026-11-26T10:00:00Z", "stream": "stderr",
-                 "message": f"line for {q}"}]}})
+            rows = [{"name": "pod-1", "containerName": "main", "time": "2026-11-26T10:00:00Z", "stream": "stderr",
+                     "message": f"line for {q}"}]
+            if "container" not in req.url.params:                   # no filter: the log shipper's lines come too
+                rows.append({"name": "pod-1", "containerName": "main-0-sc", "time": "2026-11-26T10:00:01Z", "stream": "stderr",
+                             "message": "vector noise"})
+            return httpx.Response(200, json={"data": {"total_hits": {"*": 40, "error": 3}.get(q, 0), "results": rows}})
         parts = p.split("/resources/", 1)[1].split("/")
         kind = parts[0]
         if len(parts) == 1:                                               # a list, ?owner=
             owner = req.url.params.get("owner")
-            return httpx.Response(200, json={"resources": [{"name": n, "status": "active"} for (k, n), o in resources.items()
+            return httpx.Response(200, json={"resources": [{"name": n, "owner": o, "status": "active"}
+                                                           for (k, n), o in resources.items()
                                                            if k == kind and (not owner or o == owner)]})
         name = parts[1]
         if (kind, name) not in resources:
@@ -132,6 +136,10 @@ def server(monkeypatch):
         if len(parts) == 2:
             return httpx.Response(200, json={"name": name, "owner": resources[(kind, name)], "status": {
                 "aggregateStatus": "active", "runtimeState": {"status": f"{kind}-service:running:1"}}})
+        if parts[2] == "runtime" and kind == "lakehouse":            # several containers: no single filter
+            return httpx.Response(200, json={"nodeDetails": [
+                {"name": "lake-ms", "phase": "running", "dataplane": "poldp01", "containers": ["ms"]},
+                {"name": "lake-sc", "phase": "running", "dataplane": "poldp01", "containers": ["sc"]}]})
         if parts[2] == "runtime":
             return httpx.Response(200, json={"nodeDetails": [
                 {"name": "pod-1", "phase": "running", "type": "cgroup-stateless", "dataplane": "poldp01", "containers": ["main"],
@@ -187,7 +195,7 @@ def test_tools_read_as_the_owner_and_stay_inside_their_apps(server, monkeypatch)
     with pytest.raises(Exception, match="no app someone-elses"):
         call(mod, "search_logs", name="someone-elses")
     with pytest.raises(Exception, match="kind is one of"):
-        call(mod, "status", name="chatbot", kind="database")
+        call(mod, "status", name="chatbot", kind="depot")                  # a depot runs nothing: no logs
 
 
 def test_services_too(server, monkeypatch):
@@ -209,6 +217,31 @@ def test_services_too(server, monkeypatch):
     assert [a["name"] for a in payload(call(mod, "list_apps"))] == ["dapp"]
     with pytest.raises(Exception, match="not one of the resources this server may watch: app:dapp, service:their-svc"):
         call(mod, "recent_logs", name="chatbot")
+
+
+def test_tenant_mode_the_owner_sees_all_others_only_their_own(server, monkeypatch):
+    mod, calls, _ = server
+    monkeypatch.setenv("MONITOR_ALLOW", "tenant")
+    assert [r["name"] for r in payload(call(mod, "list_resources", kind="service"))] == ["orders-api", "their-svc"]
+    assert payload(call(mod, "recent_logs", name="their-svc", kind="service"))["containers"]     # bob's, read by the owner
+    lake = payload(call(mod, "search_logs", name="lake1", kind="lakehouse", query="error"))
+    assert "/resources/lakehouse/v1alpha/lake1/logs/search" in calls[-1].url.path
+    assert [x["container"] for x in lake["lines"]] == ["main"] and "log shipper left out" in lake["note"]
+    assert payload(call(mod, "status", name="lake1", kind="lakehouse"))["owner"] == "rohit"
+
+    token = mod._viewer.set("bob")                                         # bob opens the Log Assistant
+    try:
+        assert [r["name"] for r in payload(call(mod, "list_resources", kind="service"))] == ["their-svc"]
+        assert payload(call(mod, "list_resources", kind="lakehouse")) == []
+        with pytest.raises(Exception, match="belongs to alice; you can watch your own"):
+            call(mod, "recent_logs", name="orders-api", kind="service")
+        with pytest.raises(Exception, match="belongs to rohit"):
+            call(mod, "search_logs", name="lake1", kind="lakehouse")      # the owner's admin rights are not lent to bob
+        monkeypatch.setenv("MONITOR_SHARE", "service:orders-api")
+        assert payload(call(mod, "recent_logs", name="orders-api", kind="service"))["containers"]
+        assert [r["name"] for r in payload(call(mod, "list_resources", kind="service"))] == ["their-svc", "orders-api"]
+    finally:
+        mod._viewer.reset(token)
 
 
 def test_only_the_gateway_gets_in(server):

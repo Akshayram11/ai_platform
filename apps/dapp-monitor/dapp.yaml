@@ -22,6 +22,8 @@ secrets: [dapp-dapp-monitor-token]
 env:
   DATAOS_FQDN: poliks.instance.dataos.cloud
   TOOL_ALLOWED_HOSTS: dapp-monitor:8080,dapp-monitor
-  # what may be watched: "*" = everything this app's owner owns (apps, services ...), or a list like
-  # "chatbot, service:orders-api" (a bare name is an app)
-  MONITOR_ALLOW: "*"
+  # what may be watched: "tenant" = the owner watches everything DataOS lets them read (apps, services, vulcan, minerva,
+  # lakehouses, pipelines); anyone else only their own resources plus MONITOR_SHARE. "*" = only the owner's own;
+  # or a list like "chatbot, service:orders-api" (a bare name is an app)
+  MONITOR_ALLOW: tenant
+  MONITOR_SHARE: ""             # e.g. "vulcan:orders-dp, app:chatbot": what every allowed person may watch too

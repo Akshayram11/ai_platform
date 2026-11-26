@@ -35,7 +35,8 @@ app = FastAPI(title="Log Assistant", root_path=ROOT)
 TOOLS = Toolbox.from_env()
 _client: OpenAI | None = None
 
-SYSTEM = """You are the Log Assistant of DataOS. You help a person understand the logs of their apps and services.
+SYSTEM = """You are the Log Assistant of DataOS. You help a person understand the logs of DataOS resources that run pods: apps,
+services, vulcan data products, minerva clusters, lakehouses, nilus pipelines, workflows and workers (pass kind).
 Use the dapp-monitor tools to look; never guess what a log says. Prefer, in order: log_summary (where to look), search_logs
 (a keyword and a window: since='1h' or start/end in ISO UTC), recent_logs (what is happening right now), status (is it up,
 which pods). Times in the logs are UTC; say times in UTC. Quote the few log lines that support your answer (as `code`), say
