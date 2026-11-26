@@ -13,7 +13,7 @@
 name: claude-code
 title: Claude Code
 description: Claude Code in a browser terminal; builds and deploys DataOS apps with dapp
-image: docker.io/tmdcio/dapp-claude-code:0.1.12
+image: docker.io/tmdcio/dapp-claude-code:0.1.13
 command: [/opt/claude/start.sh]
 port: 8080
 compute: engineering-compute

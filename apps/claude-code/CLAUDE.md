@@ -83,6 +83,8 @@ root, no `apt`, and no Docker here (deploy apps with `dapp`). Check space with `
 - `dapp logs NAME` is the running pod's last lines. For anything in the past ("why did it crash last night?", "errors between 16:00
   and 17:00"), search DataOS's stored logs, old and crashed pods included: `dapp logs NAME --search error --since 24h`,
   `--from 2026-11-26T16:00:00Z --to 2026-11-26T17:00:00Z`, `--stream stderr`, `--kind service` for a service. Times are UTC.
+- You have the same as MCP tools here: `dapp-monitor` (registered at start) with `list_resources`, `status`, `recent_logs`,
+  `search_logs`, `log_summary` for apps and services (kind). Use them to check an app you deployed or to answer "why did X fail".
 - An app can do the same through the gateway tool `dapp-monitor` (`tools: [dapp-monitor]` with `llm: true`): `list_resources`,
   `status`, `recent_logs`, `search_logs`, `log_summary`, each with `kind` (app or service). It searches the app's own container
   (not DataOS's log shipper) and masks credentials. Ask the owner to allow your app on it (`dapp tool allow dapp-monitor app:NAME`).

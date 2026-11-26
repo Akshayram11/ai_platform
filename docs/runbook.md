@@ -9,7 +9,7 @@
 | `immortal-obj` | `dapp-runtime:python-3.12-r7` | Volume `immortal-obj` |
 | `chatbot` | `dapp-chatbot:0.1.14` | `llm`, `objects`, `metrics`; models `gpt-6-luna` and `small`; history |
 | `data-chat` | runtime `python-3.12-r8` from source | `llm`, `objects`, `tools: [dataproduct-mcp]`; model `small` |
-| `claude-code` | `dapp-claude-code:0.1.12` | 1→2 CPU, 4→6 GiB (on-demand desktop); Volume `claude-code-home` 20 Gi at `/data`; token secret `dapp-claude-code-anthropic` |
+| `claude-code` | `dapp-claude-code:0.1.13` | 1→2 CPU, 4→6 GiB (on-demand desktop); Volume `claude-code-home` 20 Gi at `/data`; token secret `dapp-claude-code-anthropic` |
 | `dapp-monitor` | runtime `python-3.12` (code in `apps/dapp-monitor/app`) | MCP tool behind the gateway; secret `dapp-dapp-monitor-token`; gateway `DAPP_TOOL_INTERNAL_HOSTS` lists it |
 | Runtime image | `dapp-runtime:python-3.12-r9` | what `RUNTIME_REVISION` points at; apps pick it up on their next deploy |
 All images are under `docker.io/tmdcio/`. Nothing of this work is committed to git yet.

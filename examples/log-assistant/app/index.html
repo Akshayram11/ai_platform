@@ -49,13 +49,13 @@ section.logs{flex:1;display:flex;flex-direction:column;min-width:0;padding:12px 
 .row.error{background:var(--err-bg);border-left-color:var(--err)}.row.error .lv{color:var(--err)}
 .empty{padding:28px;text-align:center;color:var(--muted);font-family:system-ui}
 .count .sp{flex:1}
-#chat{display:none;height:42vh;min-height:230px;border-top:2px solid var(--ai);background:var(--panel);flex-direction:column}
+#chat{display:none;width:min(460px,42vw);min-width:320px;border-left:2px solid var(--ai);background:var(--panel);flex-direction:column}
 #chat.on{display:flex}
 .chead{display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1px solid var(--line)}
 .chead b{color:var(--ai)}.chead .ctx{color:var(--muted);font-size:12.5px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chead button{border:1px solid var(--line);background:none;border-radius:6px;padding:3px 9px;cursor:pointer}
 #msgs{flex:1;overflow:auto;padding:12px 16px;display:flex;flex-direction:column;gap:10px}
-.m{max-width:78%;padding:9px 12px;border-radius:12px;white-space:pre-wrap;word-break:break-word}
+.m{max-width:92%;padding:9px 12px;border-radius:12px;white-space:pre-wrap;word-break:break-word}
 .m.user{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:3px}
 .m.bot{align-self:flex-start;background:var(--code);border-bottom-left-radius:3px}
 .m.bot code{background:var(--panel);padding:1px 5px;border-radius:4px;font-size:12px}
@@ -69,7 +69,8 @@ form.ask input{flex:1;border:1px solid var(--line);border-radius:20px;padding:8p
 form.ask button{border:0;background:var(--ai);color:#fff;border-radius:20px;padding:8px 18px;font-weight:600;cursor:pointer}
 form.ask button:disabled{opacity:.5}
 .err{color:var(--err)}
-@media (max-width:820px){aside{display:none}.row{grid-template-columns:34px 48px 1fr}.row .t{display:none}}
+@media (max-width:820px){aside{display:none}.row{grid-template-columns:34px 48px 1fr}.row .t{display:none}
+  main{flex-direction:column}#chat{width:auto;min-width:0;height:50vh;border-left:0;border-top:2px solid var(--ai)}}
 </style></head>
 <body>
 <div class="top">
@@ -108,7 +109,6 @@ form.ask button:disabled{opacity:.5}
       <span class="sp"></span><button id="aibtn" title="Ask the AI about these logs">✦ Ask AI</button></div>
     <div class="table" id="table"><div class="empty">Pick a resource.</div></div>
   </section>
-</main>
 <div id="chat">
   <div class="chead"><b>✦ Log Assistant</b><span class="ctx" id="ctx"></span><button id="clear">New chat</button><button id="close">✕</button></div>
   <div id="msgs"></div>
@@ -119,17 +119,29 @@ form.ask button:disabled{opacity:.5}
   <form class="ask" id="ask"><input id="question" placeholder="Ask about these logs… (e.g. kal raat 2 baje kya error aaya?)" autocomplete="off">
     <button id="send">Ask</button></form>
 </div>
+</main>
 <script>
 (() => {
   const ROOT = "__ROOT__", $ = id => document.getElementById(id);
   const S = {kind: "app", name: null, mode: "historical", q: "", since: "1h", start: null, end: null, pod: null, order: "latest", lines: []};
   let chat = [];
   const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-  async function api(path, opts) {
-    const r = await fetch(ROOT + path, opts);
-    const t = await r.text(); let d; try { d = JSON.parse(t); } catch { d = t; }
-    if (!r.ok) throw new Error((d && d.detail) || t || r.status);
-    return d;
+  // A restarting app (an access change restarts it for ~40 s) or a moving gateway answers with DataOS's / Cloudflare's own HTML
+  // error page: never show that HTML; retry a few times, then say it in one sentence.
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  async function api(path, opts, tries = 4) {
+    for (let i = 1; ; i++) {
+      let r, t;
+      try { r = await fetch(ROOT + path, opts); t = await r.text(); }
+      catch (e) { if (i < tries) { await sleep(3000 * i); continue; } throw new Error("Can't reach the app right now. Check your connection and try again."); }
+      let d; try { d = JSON.parse(t); } catch { d = null; }
+      if (r.ok && d !== null) return d;
+      const busy = [502, 503, 504, 520, 521, 522, 523, 524].includes(r.status) || (!r.ok && d === null);
+      if (busy && i < tries) { await sleep(3000 * i); continue; }
+      if (d && d.detail) throw new Error(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      throw new Error(r.status === 401 || r.status === 403 ? "Your sign-in expired: reload the page." :
+        `The app is not answering right now (HTTP ${r.status}); it may be restarting, e.g. after an access change. Try again in a minute.`);
+    }
   }
   async function loadResources() {
     $("resource").innerHTML = "<option>loading…</option>";
@@ -223,6 +235,7 @@ form.ask button:disabled{opacity:.5}
     $("sugg").style.display = "none"; $("question").value = ""; $("send").disabled = true;
     add("user", esc(q)); chat.push({role: "user", content: q});
     const wait = add("bot", "Looking at the logs…");
+    const slow = setTimeout(() => { if (wait.textContent.startsWith("Looking")) wait.textContent = "Still looking (the app may be restarting)…"; }, 8000);
     try {
       const d = await api("/api/chat", {method: "POST", headers: {"content-type": "application/json"},
         body: JSON.stringify({messages: chat, context: {name: S.name, kind: S.kind, mode: S.mode, q: S.q || null,
@@ -231,6 +244,7 @@ form.ask button:disabled{opacity:.5}
       wait.innerHTML = (steps ? `<div class="steps">${steps}</div>` : "") + md(d.answer || "(no answer)");
       chat.push({role: "assistant", content: d.answer || ""});
     } catch (e) { wait.innerHTML = `<span class="err">${esc(e.message)}</span>`; chat.pop(); }
+    clearTimeout(slow);
     $("send").disabled = false; $("msgs").scrollTop = $("msgs").scrollHeight;
   }
   loadResources();

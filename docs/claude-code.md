@@ -62,28 +62,31 @@ Private (DataOS sign-in), and `dapp_proxy` additionally lets only the **owner** 
 DataOS identity (DataOS gives the pod `DATAOS_RUN_AS_USER` / `DATAOS_RUN_AS_APIKEY`), so everything it deploys is yours and
 DataOS permissions apply. It has a shell: treat the page like a terminal on your account.
 
-## Add the dapp MCP to online Claude Code
+## DataOS tools in online Claude Code (dapp-monitor by default)
 
-The `dapp` MCP lets Claude list your DataOS apps and inspect pod status, recent logs, and usage. Claude launches the
-server as a local process over stdio. It inherits the terminal's DataOS identity, so the same DataOS permissions apply.
+Every start registers the gateway tool **`dapp-monitor`** for Claude (`start.sh`, `DAPP_CLAUDE_TOOLS`, default `dapp-monitor`;
+space-separated names, `""` for none). Claude then has `list_resources`, `status`, `recent_logs`, `search_logs` (any time range,
+old pods included) and `log_summary`, for apps and services ([dapp-monitor.md](dapp-monitor.md)). `dapp tool connect`
+registers a small stdio bridge (`dapp tool bridge dapp-monitor`, httpx only: no MCP SDK, no venv) that signs every call with
+this pod's DataOS identity, so the gateway checks that you may use the tool and records each call. A tool that is not on the
+gateway, or that you may not use, is skipped with a line in the app's log.
 
-In the online Claude terminal, enter `/exit` to return to the shell. The current `dapp mcp` server uses the Python MCP
-SDK v1. Set up a virtual environment that can see the installed `dapp` CLI and uses a compatible SDK:
+Before an image with this default, or to switch by hand, in the online terminal (`/exit` from Claude first):
 
 ```bash
-python3 -m venv --system-site-packages "$HOME/.venvs/dapp-mcp"
-uv pip install --python "$HOME/.venvs/dapp-mcp/bin/python" 'mcp>=1.2,<2'
-claude mcp add --scope user dapp -- "$HOME/.venvs/dapp-mcp/bin/python" "$(command -v dapp)" mcp
+claude mcp remove --scope user dapp
+dapp tool connect dapp-monitor
 claude mcp list
 claude --continue
 ```
 
-If a user-scoped `dapp` entry already points to an older command, run `claude mcp remove --scope user dapp`, then repeat the
-`claude mcp add` command. In Claude, use `/mcp` to check the connection. To try a read-only diagnosis, ask:
+The old setup (a venv with `mcp<2` running `dapp mcp`) is no longer needed: `rm -rf ~/.venvs/dapp-mcp` removes it. To try it,
+ask Claude:
 
-> Use the dapp MCP to list my apps. Check the status and recent logs for `chatbot`, and quote the lines that support any issue you find.
+> Use dapp-monitor: is chatbot running, and were there any errors in its logs in the last 24 hours? Quote the lines.
 
-The setup survives pod restarts when your Claude machine's home directory is on a persistent DataOS Volume.
+The full `dapp` MCP (deploy, scale, secrets, access) still exists as `dapp mcp` (it works with MCP SDK 2.x from claude-code
+0.1.13); online, Claude usually doesn't need it, because it runs the `dapp` CLI directly.
 
 ## What survives
 | Thing | Survives a browser refresh | Survives a pod restart or move |
@@ -141,5 +144,5 @@ and on SIGTERM; a save only starts after a successful restore, so a failed resto
 - **Deploy from the pod fails with `owner is required`:** the pod writes through the REST API (no `dataos-ctl`). The API writer sets the owner and encodes secret
   values since claude-code 0.1.5; on an older image, rebuild. Test the pod's path from the laptop with `DAPP_WRITER=api uv run dapp deploy -f dapp.yaml`.
 - **The browser says "stopped by itself":** Chromium ran out of memory. Close heavy tabs, or raise the memory limit in Customize.
-- **Build:** `docker buildx build --platform linux/amd64 -f apps/claude-code/Dockerfile -t docker.io/tmdcio/dapp-claude-code:0.1.12 --push .`
+- **Build:** `docker buildx build --platform linux/amd64 -f apps/claude-code/Dockerfile -t docker.io/tmdcio/dapp-claude-code:0.1.13 --push .`
   then bump the tag in `dapp.yaml` and `src/dapp/claude.py` (`CLAUDE_CODE_IMAGE`).

@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from .models import mebibytes, milli_cpu
 from .spec import AppSpec
 
-CLAUDE_CODE_IMAGE = "docker.io/tmdcio/dapp-claude-code:0.1.12"   # built from apps/claude-code
+CLAUDE_CODE_IMAGE = "docker.io/tmdcio/dapp-claude-code:0.1.13"   # built from apps/claude-code
 CLAUDE_TAG = "dapp-claude"
 TOKEN_KEY = "CLAUDE_CODE_OAUTH_TOKEN"
 # Claude alone peaks near 350 MiB; the on-demand browser (Chromium, Xvfb, noVNC) adds ~1-1.5 GiB while it runs and nothing when stopped

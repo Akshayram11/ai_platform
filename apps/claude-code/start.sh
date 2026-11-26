@@ -59,6 +59,16 @@ export DATAOS_FQDN="${DATAOS_FQDN:?DATAOS_FQDN must be set}"
 export DAPP_PROXY_ONLY="${DATAOS_RUN_AS_USER:?DataOS did not set DATAOS_RUN_AS_USER}"
 BASE="${ROOT_PATH:-/}"
 
+# Gateway tools Claude gets by default (DAPP_CLAUDE_TOOLS, space separated; "" for none): dapp-monitor = status and logs of
+# apps and services, at any time. `dapp tool connect` registers a small stdio bridge that signs every call with this pod's
+# DataOS identity, so the gateway checks and records who uses it. A tool that isn't on the gateway, or that this person may
+# not use, is skipped. Before the terminal opens (so Claude starts with it), but at most 30 s each.
+for t in ${DAPP_CLAUDE_TOOLS-dapp-monitor}; do
+  claude mcp remove --scope user "$t" >/dev/null 2>&1 || true
+  timeout 30 dapp tool connect "$t" >/dev/null 2>&1 \
+    || echo "[start] gateway tool $t not added for Claude (not on the gateway, or not allowed for you)" >&2
+done
+
 # Bring back what was saved before the terminal opens; only if that worked, keep saving (a failed restore must not
 # overwrite the saved copy with an empty folder).
 # On the machine's own disk the restore happens once (the first start, to bring over what was saved before): after that

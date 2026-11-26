@@ -1,7 +1,7 @@
 # Claude Code's own machine on DataOS: a web terminal (ttyd) and an on-demand shared desktop (Openbox + Chromium on Xvfb, seen
 # through noVNC; Claude drives the browser through Playwright MCP and the whole screen through desktop_mcp.py), a home on its
 # own Volume, and previews of apps it runs (/port/N/). Behind DataOS sign-in (dapp_proxy), owner only.
-#   docker buildx build --platform linux/amd64 -f apps/claude-code/Dockerfile -t docker.io/tmdcio/dapp-claude-code:0.1.12 --push .
+#   docker buildx build --platform linux/amd64 -f apps/claude-code/Dockerfile -t docker.io/tmdcio/dapp-claude-code:0.1.13 --push .
 FROM node:22-bookworm-slim AS node
 
 FROM python:3.12-slim
