@@ -79,7 +79,7 @@ footer{max-width:1180px;margin:0 auto;padding:0 16px 32px;color:var(--muted);fon
     <a href="{{ root }}/" class="{{ 'on' if seg in ('', 'apps') }}">Apps</a>
     <a href="{{ root }}/storage" class="{{ 'on' if seg == 'storage' }}">Storage</a>
     <a href="{{ root }}/models" class="{{ 'on' if seg == 'models' }}">Models</a>
-    <a href="{{ root }}/pipelines" class="{{ 'on' if seg == 'pipelines' }}">Pipelines</a>
+    <a href="{{ root }}/pipelines" class="{{ 'on' if seg in ('pipelines', 'sources') }}">Pipelines</a>
     <a href="{{ root }}/claude" class="{{ 'on' if seg == 'claude' }}">Claude Code</a>
     <a href="{{ root }}/tools" class="{{ 'on' if seg == 'tools' }}">Tools</a>
     <a href="{{ root }}/keys" class="{{ 'on' if seg == 'keys' }}">Keys</a>

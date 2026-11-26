@@ -13,7 +13,7 @@ BASE = "/poros/api/v2/tenants/ai"
 PG = {"name": "pgrds", "type": "depot", "owner": "rajat", "spec": {"type": "postgresql", "owners": ["rajat"],
       "secrets": [{"id": "ai:pgsecret", "purpose": p} for p in ("scan", "rw")]}}
 LH = {"name": "lake", "type": "depot", "owner": "rohit", "spec": {"type": "lakehouse",
-      "secrets": [{"id": "ai:lakesecret", "purpose": "rw"}]}}
+      "spec": {"metastoreRelativePath": "/lh/ai/cat"}, "secrets": [{"id": "ai:lakesecret", "purpose": "rw"}]}}
 NOT_ALLOWED = ("failure validating tenant resource : could not resolve the DataOsAddress dataos://lake?purpose=rw, error: "
                "not-allowed, subject 'users:id:{me}', predicate 'read', object 'dataos:system:ds:lake', "
                "authorization_atom_id 'depot-access'")
@@ -25,6 +25,8 @@ class Fake:
     def __init__(self, me: str, *, allowed: set[str] = frozenset({"pgrds", "lake"}), tags=()):
         self.me, self.allowed, self.tags = me, set(allowed), list(tags)
         self.store = {("depot", "pgrds"): PG, ("depot", "lake"): LH}
+        self.tables = {("raw", "orders"): {"rows": 31, "bytes": 2986}}        # the Iceberg catalog behind /lh/ai/cat
+        self.dropped: list[tuple[str, dict]] = []
         self.calls: list[tuple[str, str]] = []
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
@@ -32,10 +34,22 @@ class Fake:
         self.calls.append((req.method, path))
         if path.startswith("/heimdall/api/v1/users/"):
             return httpx.Response(200, json={"id": self.me, "tags": self.tags})
+        if path.startswith("/lh/ai/cat/v1/namespaces/"):
+            ns, _, name = path.removeprefix("/lh/ai/cat/v1/namespaces/").partition("/tables/")
+            t = self.tables.get((ns, name))
+            if t is None:
+                return httpx.Response(404, json={})
+            if req.method == "DELETE":
+                self.dropped.append(((ns, name), dict(req.url.params)))
+                del self.tables[(ns, name)]
+                return httpx.Response(204)
+            return httpx.Response(200, json={"metadata": {"current-snapshot-id": 7, "snapshots": [
+                {"snapshot-id": 7, "summary": {"total-records": str(t["rows"]), "total-files-size": str(t["bytes"]),
+                                               "total-data-files": "1"}}]}})
         if path.startswith("/nilus-manager/api/v1/tenants/ai/pipelines/workflow:v2alpha:"):
             if path.endswith("/runs"):
                 return httpx.Response(200, json={"total_count": 1, "pipelines": [
-                    {"started_at": "t", "duration_sec": 16.8, "is_success": True,
+                    {"started_at": "t", "duration_sec": 16.8, "is_success": True, "destination_table": "raw.orders",
                      "records_count": {"orders": 31, "_nilus_pipeline_state": 1}}]})
             return httpx.Response(200, json={"stats": {"total_runs": 1, "success_rate": 100.0}})
         parts = path[len(BASE):].strip("/").split("/")
@@ -130,3 +144,55 @@ def test_only_the_depot_owner_or_a_tenant_admin_grants_one_depot():
         owner.revoke_depot_grant("lake", "someone-elses-grant")
     admin, _ = make("tina", tags=["roles:id:ai-tenant-admin"])
     assert admin.can_grant(PG)
+
+
+def test_delete_with_its_table_only_when_it_is_this_pipelines_to_drop():
+    p, fake = make()
+    p.deploy_pipeline(req())
+    left = p.pipeline_leftovers("orders")
+    assert left["table"] == {"depot": "lake", "table": "raw.orders", "shared_with": [], "exists": True, "rows": 31,
+                             "bytes": 2986, "files": 1, "can_drop": True}
+    assert left["source"] is None                                   # pgrds is not a source dapp connected
+    with pytest.raises(PlatformError, match="won't remove the source"):
+        p.delete_pipeline("orders", remove_source=True)
+    assert ("nilus", "orders") in fake.store                         # a refused extra deletes nothing
+    out = p.delete_pipeline("orders", drop_table=True)
+    assert out["table_dropped"] == "dropped lake raw.orders" and out["problems"] == []
+    assert fake.dropped == [(("raw", "orders"), {"purgeRequested": "true"})] and ("nilus", "orders") not in fake.store
+
+
+def test_a_table_someone_else_writes_or_that_this_pipeline_never_wrote_is_not_dropped():
+    p, fake = make()
+    p.deploy_pipeline(req())
+    p.deploy_pipeline(req(name="orders-two"))                       # same destination table
+    left = p.pipeline_leftovers("orders")
+    assert left["table"]["can_drop"] is False and left["table"]["shared_with"] == ["orders-two"]
+    assert "also write it" in left["table"]["why"]
+    with pytest.raises(PlatformError, match="orders-two also write it"):
+        p.delete_pipeline("orders", drop_table=True)
+    assert ("raw", "orders") in fake.tables and ("nilus", "orders") in fake.store
+    # a table the pipeline's runs never wrote: someone's existing table that dest_table happens to point at
+    fake.tables[("raw", "customers")] = {"rows": 9, "bytes": 1}
+    p.deploy_pipeline(req(name="mine-custom", dest_table="raw.customers"))
+    q = p.pipeline_leftovers("mine-custom")["table"]
+    assert q["exists"] and q["can_drop"] is False and "not ours to drop" in q["why"]
+    # someone else's pipeline: no extras at all
+    fake.store[("nilus", "orders-two")]["owner"] = "carol"
+    assert p.pipeline_leftovers("orders-two")["table"]["can_drop"] is False
+    with pytest.raises(PlatformError, match="someone else owns"):
+        p.delete_pipeline("orders-two", drop_table=True)
+
+
+def test_a_source_dapp_connected_is_removed_with_the_pipeline_unless_another_pipeline_uses_it():
+    p, fake = make()
+    fake.store[("depot", "pgrds")] = {**PG, "owner": "alice", "tags": ["dapp-source"]}
+    fake.store[("secret", "dapp-src-pgrds")] = {"name": "dapp-src-pgrds", "type": "secret", "owner": "alice"}
+    p.deploy_pipeline(req())
+    p.deploy_pipeline(req(name="orders-two", dest_table="raw.other"))
+    left = p.pipeline_leftovers("orders")
+    assert left["source"] == {"depot": "pgrds", "shared_with": ["orders-two"], "can_remove": False}
+    with pytest.raises(PlatformError, match="other pipelines still use it"):
+        p.delete_pipeline("orders", remove_source=True)
+    p.delete_pipeline("orders-two")
+    out = p.delete_pipeline("orders", remove_source=True)
+    assert out["source_removed"] == "pgrds" and ("depot", "pgrds") not in fake.store and ("secret", "dapp-src-pgrds") not in fake.store

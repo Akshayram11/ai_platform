@@ -9,7 +9,8 @@
     how it changes. The right pipeline (a one-time copy, a scheduled sync, live change capture, an event stream, or a catalog scan)
     is chosen for you and starts as soon as you deploy it. From a terminal: <code>dapp pipeline new</code>.</p>
   </div>
-  <a href="{{ root }}/pipelines/new"><button class="primary">New pipeline</button></a>
+  <div class="row" style="gap:8px"><a href="{{ root }}/sources"><button>Connect a source</button></a>
+  <a href="{{ root }}/pipelines/new"><button class="primary">New pipeline</button></a></div>
 </div>
 
 {% if pipelines_error %}<div class="flash err">Could not list pipelines: {{ pipelines_error }}</div>{% endif %}
@@ -34,7 +35,7 @@
 <h2>Pipelines in {{ s.tenant }}</h2>
 <div class="panel">
 {% if rows %}
-<table><thead><tr><th>Name</th><th>Kind</th><th>From</th><th>To</th><th>When</th><th>Last run</th><th>Owner</th></tr></thead><tbody>
+<table><thead><tr><th>Name</th><th>Kind</th><th>From</th><th>To</th><th>When</th><th>Last run</th><th>Owner</th><th></th></tr></thead><tbody>
 {% for r in rows %}
 <tr><td><a href="{{ root }}/pipelines/{{ r.name }}"><b>{{ r.name }}</b></a>{% if r.description %}<div class="muted" style="font-size:11.5px">{{ r.description }}</div>{% endif %}</td>
   <td><span class="pill info">{{ r.type }}</span>{% if r.strategy %} <span class="muted" style="font-size:11.5px">{{ r.strategy }}</span>{% endif %}</td>
@@ -42,7 +43,8 @@
   <td>{% if r.dest %}<code>{{ r.dest }}</code><div class="muted" style="font-size:11.5px">{{ r.dest_table }}</div>{% else %}<span class="muted">catalog</span>{% endif %}</td>
   <td class="muted">{{ r.cron or ('continuous' if r.type in ('cdc', 'stream') else 'once') }}</td>
   <td><span class="pill {{ {'completed':'ok','failed':'bad','running':'warn','initializing':'warn','pending':'warn'}.get(r.phase, '') }}">{{ r.phase }}</span></td>
-  <td>{{ 'you' if r.mine else r.owner }}</td></tr>
+  <td>{{ 'you' if r.mine else r.owner }}</td>
+  <td>{% if r.mine %}<a href="{{ root }}/pipelines/{{ r.name }}#delete" class="muted">Delete…</a>{% endif %}</td></tr>
 {% endfor %}
 </tbody></table>
 {% else %}<div class="empty">No pipeline yet. <a href="{{ root }}/pipelines/new">Make the first one</a>: it takes four questions.</div>{% endif %}

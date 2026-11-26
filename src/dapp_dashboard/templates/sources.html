@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Sources · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% block body %}
+<p class="sub" style="margin-bottom:8px"><a href="{{ root }}/pipelines">← Pipelines</a></p>
+<div class="row" style="justify-content:space-between;align-items:end">
+  <div><h1>Sources</h1>
+  <p class="sub" style="margin-bottom:0">Connect a system that isn't in DataOS yet. Its credentials go into a DataOS Secret that only you can use, and
+  a Depot is made on top, so pipelines (and Minerva, Vulcan) can reach it.</p></div>
+  <a href="{{ root }}/sources/new"><button class="primary">Connect a source</button></a>
+</div>
+
+<h2>Quick start</h2>
+<div class="panel row" style="gap:8px;flex-wrap:wrap">
+  {% for pr in presets %}<a href="{{ root }}/sources/new?preset={{ pr.key }}"><button>{{ pr.title }}</button></a>{% endfor %}
+  <a href="{{ root }}/sources/new"><button>Something else…</button></a>
+</div>
+
+{% if sources_error %}<div class="flash err">Could not list your sources: {{ sources_error }}</div>{% endif %}
+<h2>Sources you connected</h2>
+<div class="panel">
+{% if rows %}
+<table><thead><tr><th>Name</th><th>System</th><th>Where</th><th>Credentials</th><th></th></tr></thead><tbody>
+{% for r in rows %}
+<tr><td><b>{{ r.name }}</b>{% if r.description %}<div class="muted" style="font-size:11.5px">{{ r.description }}</div>{% endif %}</td>
+  <td>{{ r.label }}</td><td class="muted">{{ r.where or '–' }}</td>
+  <td><code>{{ (r.secret or '').split(':')[-1] }}</code><div class="muted" style="font-size:11.5px">never shown again</div></td>
+  <td style="white-space:nowrap"><a href="{{ root }}/pipelines/new?source={{ r.name|urlencode }}">Bring data in</a></td></tr>
+<tr><td colspan="5" style="border-top:0;padding-top:0">
+  <details><summary class="muted" style="font-size:12px">Replace credentials or remove</summary>
+  <form class="row" method="post" action="{{ root }}/sources/{{ r.name }}/creds" style="margin:8px 0" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    {% if r.kind in ('postgresql', 'mysql', 'mongodb') %}
+    <input type="password" name="url" placeholder="new connection string" size="40" autocomplete="new-password">
+    <span class="muted" style="align-self:center">or</span>
+    {% endif %}
+    <input name="secret.username" placeholder="username" size="16" autocomplete="off">
+    <input type="password" name="secret.password" placeholder="new password" size="16" autocomplete="new-password">
+    <button>Replace credentials</button>
+  </form>
+  <form class="row" method="post" action="{{ root }}/sources/{{ r.name }}/delete" style="margin:0 0 8px">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <input name="confirm" placeholder="type {{ r.name }}" size="18">
+    <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="keep_secret" value="1"> keep the Secret</label>
+    <button class="danger">Remove source</button>
+    <span class="muted" style="font-size:12px;align-self:center">Removes the Depot, its credentials and the access grants. Pipelines using it stop.</span>
+  </form>
+  </details>
+</td></tr>
+{% endfor %}
+</tbody></table>
+{% else %}<div class="empty">None yet. Pick one above.</div>{% endif %}
+</div>
+
+<h2>What happens to your credentials</h2>
+<div class="panel muted" style="font-size:13px">
+<ul style="margin:0;padding-left:18px">
+<li>You type them here over HTTPS. This dashboard keeps them only while it creates the Secret: never in its storage, logs or pages.</li>
+<li>They live in a DataOS Secret (<code>dapp-src-NAME</code>) owned by you. Pipelines get them from DataOS when they run; manifests only name the Secret.</li>
+<li>Nobody else can use the source until you approve their request. Approving also lets them read the Secret, so connect with a
+<b>separate read-only user</b> on the source, not your own account.</li>
+<li>Changed the password at the source? Use <i>Replace credentials</i>. Removing a source deletes its Secret too (unless you keep it).</li>
+</ul>
+</div>
+{% endblock %}

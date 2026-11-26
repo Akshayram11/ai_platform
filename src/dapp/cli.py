@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from pydantic import SecretStr
 from rich.console import Console
 from rich.table import Table
 
@@ -24,6 +25,7 @@ from .ctl import WriteError
 from .pipelines import HOWS, PipelineRequest
 from .pipelines import summary as pipeline_summary
 from .platform import PipelineAccessError, Platform, PlatformError
+from .sources import PRESETS, SourceRequest, from_url
 from .spec import AppSpec, dump_yaml, load_spec, wire_manifest
 from .usage import GatewayError
 
@@ -47,6 +49,10 @@ pipeline_app = typer.Typer(no_args_is_help=True, context_settings=HELP_OPTIONS,
                            help="Move data with DataOS Nilus in plain words: Depots, new, ls, status, logs, run, rm "
                                 "(the dashboard's Pipelines tab).")
 app.add_typer(pipeline_app, name="pipeline")
+source_app = typer.Typer(no_args_is_help=True, context_settings=HELP_OPTIONS,
+                         help="Connect a new source (a Secret with its credentials and a Depot on top), list, replace "
+                              "credentials, remove. Credentials come from environment variables or files, never arguments.")
+app.add_typer(source_app, name="source")
 
 console = Console()
 err = Console(stderr=True)
@@ -868,14 +874,153 @@ def pipeline_run(name: str = typer.Argument(..., metavar="NAME")) -> None:
 
 @pipeline_app.command("rm")
 def pipeline_rm(name: str = typer.Argument(..., metavar="NAME"),
+                drop_table: bool = typer.Option(False, "--drop-table", help="also drop its destination table in the Lakehouse "
+                                                "(only if this pipeline wrote it and no other pipeline does); can't be undone"),
+                remove_source: bool = typer.Option(False, "--remove-source", help="also remove the source you connected for it "
+                                                   "(Depot, Secret, grants), if no other pipeline uses it"),
                 yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask (agents must pass this)")) -> None:
-    """Delete a pipeline. Data it already wrote stays in the destination."""
+    """Delete a pipeline. By default the data it wrote stays; --drop-table and --remove-source take those too."""
+    def go():
+        p = _platform()
+        if not yes:
+            if state.json or not sys.stdin.isatty():
+                raise PlatformError("refusing to delete without --yes")
+            left = p.pipeline_leftovers(name) if (drop_table or remove_source) else {}
+            extra = (f" and drop table {left['table']['table']} ({left['table'].get('rows')} rows)"
+                     if drop_table and left.get("table") else "") + (" and remove its source" if remove_source else "")
+            typer.confirm(f"Delete pipeline {name}{extra}?", abort=True)
+        out = p.delete_pipeline(name, drop_table=drop_table, remove_source=remove_source)
+        _out(out, lambda r: console.print(" ".join([f"deleted pipeline {r['name']}."] + [x for x in (r["table_dropped"],) if x] +
+                                                   ([f"removed source {r['source_removed']}."] if r["source_removed"] else []) +
+                                                   r["problems"])))
+        if out["problems"]:
+            raise typer.Exit(1)
+    _run(go)
+
+
+@pipeline_app.command("leftovers")
+def pipeline_leftovers(name: str = typer.Argument(..., metavar="NAME")) -> None:
+    """What `dapp pipeline rm NAME` could also remove (its table, its source) and what must stay, and why."""
+    _run(lambda: _out(_platform().pipeline_leftovers(name)))
+
+
+# ---------------------------------------------------------------- sources (new Depots)
+def _secret_inputs(secret_env: list[str] | None, secret_file: list[str] | None) -> dict[str, SecretStr]:
+    out: dict[str, SecretStr] = {}
+    for item in secret_env or []:
+        key, _, var = item.partition("=")
+        if not var:
+            raise ValueError(f"--secret-env takes FIELD=ENV_VAR, e.g. password=PGPASSWORD (got {key!r})")
+        if var not in os.environ:
+            raise ValueError(f"environment variable {var} is not set (set it with `read -s {var}; export {var}`)")
+        out[key.strip()] = SecretStr(os.environ[var])
+    for item in secret_file or []:
+        key, _, path = item.partition("=")
+        if not path:
+            raise ValueError(f"--secret-file takes FIELD=PATH (got {key!r})")
+        out[key.strip()] = SecretStr(Path(path).expanduser().read_text())
+    return out
+
+
+@source_app.command("types")
+def source_types(name: str = typer.Argument(None, metavar="[TYPE]")) -> None:
+    """Depot types DataOS has here, and the fields each one asks for (from DataOS's own schema)."""
+    def go():
+        types = _platform().source_types()
+        if name:
+            t = types.get(name)
+            if t is None:
+                raise PlatformError(f"no Depot type {name}; see `dapp source types`")
+            rows = [{"field": f.key, "where": "--set" if f.side == "spec" else "--secret-env", "required": f.required,
+                     "kind": f.kind, "default": f.default} for f in t.fields]
+            _out(rows, lambda rs: _table(rs, ["field", "where", "required", "kind", "default"], title=name))
+            return
+        rows = [{"type": k, "presets": ", ".join(p.key for p in PRESETS.values() if p.type == k)} for k in sorted(types)]
+        _out(rows, lambda rs: _table(rs, ["type", "presets"]))
+    _run(go)
+
+
+@source_app.command("add")
+def source_add(
+    name: str = typer.Argument(..., metavar="NAME", help="the Depot name: lower-case letters and digits"),
+    preset: str = typer.Option("", "--preset", help="supabase | neon | rds-postgres | postgresql | mysql | snowflake | mongodb"),
+    type_: str = typer.Option("", "--type", help="a Depot type (see `dapp source types`); implied by --preset or --url-env"),
+    url_env: str = typer.Option("", "--url-env", help="ENV_VAR holding a connection string (postgresql://user:pass@host:5432/db)"),
+    sets: list[str] = typer.Option(None, "--set", help="connection field FIELD=VALUE, e.g. host=db.example.com (repeatable)"),
+    secret_env: list[str] = typer.Option(None, "--secret-env", help="credential FIELD=ENV_VAR, e.g. password=PGPASSWORD"),
+    secret_file: list[str] = typer.Option(None, "--secret-file", help="credential FIELD=PATH, e.g. gcp_json_key=key.json"),
+    description: str = typer.Option("", "--description", "-d"),
+) -> None:
+    """Connect a new source: a Secret with its credentials and a Depot on top, both yours, and Can Use on them for you.
+    Then `dapp pipeline new ... --from NAME:schema.table` brings its data in."""
+    def go():
+        spec: dict[str, Any] = {}
+        creds = _secret_inputs(secret_env, secret_file)
+        kind = type_ or (PRESETS[preset].type if preset in PRESETS else "")
+        if preset and preset not in PRESETS:
+            raise ValueError(f"unknown preset {preset}; one of {', '.join(PRESETS)}")
+        if url_env:
+            if url_env not in os.environ:
+                raise ValueError(f"environment variable {url_env} is not set (set it with `read -s {url_env}; export {url_env}`)")
+            kind_u, spec, from_creds = from_url(os.environ[url_env])
+            kind = kind or kind_u
+            creds = {**{k: SecretStr(v) for k, v in from_creds.items()}, **creds}
+        for item in sets or []:
+            k, _, v = item.partition("=")
+            if k.strip() in ("password", "token", "key") or k.strip().endswith("_key"):
+                raise ValueError(f"{k} is a credential: pass it with --secret-env {k}=ENV_VAR, not --set")
+            if k.strip() == "params":
+                spec["params"] = dict(p.split(":", 1) for p in v.split(",") if ":" in p)
+            else:
+                spec[k.strip()] = v
+        if not kind:
+            raise ValueError("say what it is: --preset supabase, --type postgresql, or --url-env with a connection string")
+        req = SourceRequest(name=name, type=kind, spec=spec, secret=creds, description=description, preset=preset)
+        done = _platform().add_source(req)
+        _out(done, lambda r: console.print(
+            f"connected {r['name']} ({r['type']}): Depot {r['name']}, credentials in Secret {r['secret']} (yours only).\n"
+            f"bring data in: dapp pipeline new NAME --from {r['name']}:schema.table --to LAKEHOUSE_DEPOT --how once --dry-run"))
+    _run(go)
+
+
+@source_app.command("ls")
+def source_ls() -> None:
+    """The sources you connected."""
+    _run(lambda: _out(_platform().sources(), lambda rs: _table(rs, ["name", "label", "where", "modes", "secret", "created"])))
+
+
+@source_app.command("creds")
+def source_creds(
+    name: str = typer.Argument(..., metavar="NAME"),
+    url_env: str = typer.Option("", "--url-env", help="ENV_VAR holding the new connection string"),
+    secret_env: list[str] = typer.Option(None, "--secret-env", help="FIELD=ENV_VAR"),
+    secret_file: list[str] = typer.Option(None, "--secret-file", help="FIELD=PATH"),
+) -> None:
+    """Replace a source's credentials (e.g. after a password change). Pipelines use them from their next run."""
+    def go():
+        creds = _secret_inputs(secret_env, secret_file)
+        if url_env:
+            if url_env not in os.environ:
+                raise ValueError(f"environment variable {url_env} is not set")
+            creds = {**{k: SecretStr(v) for k, v in from_url(os.environ[url_env])[2].items()}, **creds}
+        _out(_platform().replace_source_credentials(name, creds),
+             lambda r: console.print(f"replaced the credentials of {r['name']} (Secret {r['secret']})"))
+    _run(go)
+
+
+@source_app.command("rm")
+def source_rm(name: str = typer.Argument(..., metavar="NAME"),
+              keep_secret: bool = typer.Option(False, "--keep-secret", help="leave the Secret with the credentials"),
+              yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask (agents must pass this)")) -> None:
+    """Remove a source you connected: its Depot, its Secret (the credentials) and the access grants on it."""
     def go():
         if not yes:
             if state.json or not sys.stdin.isatty():
                 raise PlatformError("refusing to delete without --yes")
-            typer.confirm(f"Delete pipeline {name}? Data it wrote stays where it is.", abort=True)
-        _out(_platform().delete_pipeline(name), lambda r: console.print(f"deleted pipeline {r['name']}"))
+            typer.confirm(f"Remove source {name}? Pipelines that use it stop working.", abort=True)
+        _out(_platform().delete_source(name, keep_secret=keep_secret), lambda r: console.print(
+            f"removed {r['name']}" + ("; its Secret too" if r["secret_deleted"] else "") +
+            (f"; these pipelines used it: {', '.join(r['pipelines_affected'])}" if r["pipelines_affected"] else "")))
     _run(go)
 
 

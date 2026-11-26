@@ -32,7 +32,7 @@ import yaml
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from dapp.auth import Heimdall, IdentityUnavailable, token_from_headers
 from dapp.claude import DEFAULTS as CLAUDE_DEFAULTS
@@ -67,6 +67,7 @@ from dapp.platform import (
     gateway_internal_url,
     gateway_public_url,
 )
+from dapp.sources import PRESETS, SourceRequest, from_url, redact
 from dapp.usage import GatewayError, GatewayUsage, Prometheus, observability_url, service_of
 from dapp_login import SCOPES, Login, Settings
 from dapp_objects import Client as ObjectsClient
@@ -1322,7 +1323,9 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         stats = _safe(lambda: p.pipeline_stats(name))
         logs = _safe(lambda: p.pipeline_logs(name, tail=120))
         manifest = {k: res[k] for k in ("name", "version", "type", "description", "spec") if k in res}
+        left = _safe(lambda: p.pipeline_leftovers(name))
         return render(request, "pipeline_detail.html", s, r=row, phase=p.pipeline_phase(name),
+                      left=left if isinstance(left, dict) and "error" not in left else None,
                       runs=runs if isinstance(runs, list) else [], runs_error=runs.get("error") if isinstance(runs, dict) else None,
                       stats=stats if isinstance(stats, dict) and "error" not in stats else None,
                       logs=logs if isinstance(logs, str) else "", mine=row["owner"] == s.user_id,
@@ -1339,16 +1342,145 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         return back(request, f"/pipelines/{name}", msg="Running again. The new run shows here in about a minute.")
 
     @api.post("/pipelines/{name}/delete")
-    def pipeline_delete(request: Request, name: str, confirm: str = Form(""), csrf: str = Form("")):
+    def pipeline_delete(request: Request, name: str, confirm: str = Form(""), drop_table: str = Form(""),
+                        remove_source: str = Form(""), csrf: str = Form("")):
         s = need(request)
         check_csrf(s, csrf)
         if confirm != name:
             return back(request, f"/pipelines/{name}", err=f"Type {name} to confirm")
         try:
-            platform_for(s).delete_pipeline(name)
+            out = platform_for(s).delete_pipeline(name, drop_table=bool(drop_table), remove_source=bool(remove_source))
         except (DataOSError, PlatformError) as e:
             return back(request, f"/pipelines/{name}", err=str(e))
-        return back(request, "/pipelines", msg=f"Deleted {name}. Data it already wrote stays in the destination.")
+        done = [f"Deleted {name}."]
+        if out["table_dropped"]:
+            done.append(out["table_dropped"].capitalize() + ".")
+        if out["source_removed"]:
+            done.append(f"Removed the source {out['source_removed']} and its credentials.")
+        if not (out["table_dropped"] or out["source_removed"]) and not out["problems"]:
+            done.append("Data it already wrote stays in the destination.")
+        problems = " ".join(out["problems"])
+        return back(request, "/pipelines", msg=" ".join(done) if not problems else None,
+                    err=(" ".join(done) + " " + problems) if problems else None)
+
+    # ------------------------------------------------------------------ sources (connect a new system: Secret + Depot)
+    # The fields come from DataOS's own Depot type schemas. Credentials are typed into password boxes, go straight into a
+    # DataOS Secret owned by the person, and are never stored here, logged, or sent back to the page (not even after an error).
+    def type_fields(p: Platform) -> dict[str, list[dict[str, Any]]]:
+        types = _safe(p.source_types)
+        if not isinstance(types, dict) or "error" in types:
+            return {}
+        return {name: [{"key": f.key, "side": f.side, "required": f.required, "kind": f.kind, "default": f.default}
+                       for f in t.fields] for name, t in sorted(types.items())}
+
+    def source_page(request: Request, s: Session, p: Platform, form: dict[str, Any], *, error_text=None,
+                    status: int = 200) -> HTMLResponse:
+        fields = type_fields(p)
+        safe_form = {k: v for k, v in form.items() if not k.startswith("secret.") and k != "url"}   # never echo credentials
+        resp = render(request, "source_new.html", s, form=safe_form, presets=list(PRESETS.values()), fields=fields,
+                      fields_json=json.dumps(fields), presets_json=json.dumps({k: {"type": v.type, "hint": v.hint,
+                                                                                   "params": v.params}
+                                                                               for k, v in PRESETS.items()}),
+                      error_text=error_text, types_error=None if fields else "DataOS did not return its Depot types")
+        resp.status_code = status
+        return resp
+
+    def parse_source(form, p: Platform) -> SourceRequest:
+        f = {k: str(v) for k, v in form.items()}
+        preset = f.get("preset", "").strip()
+        kind = f.get("type", "").strip() or (PRESETS[preset].type if preset in PRESETS else "")
+        spec: dict[str, Any] = {}
+        creds: dict[str, SecretStr] = {}
+        url = f.get("url", "").strip()
+        if url:
+            kind_u, spec, from_creds = from_url(url)
+            kind = kind or kind_u
+            creds = {k: SecretStr(v) for k, v in from_creds.items()}
+        for k, v in f.items():
+            v = v.strip()
+            if k.startswith("spec.") and v:
+                key = k[5:]
+                if key == "params":
+                    spec["params"] = {a.strip(): b.strip() for a, _, b in (x.partition("=") for x in re.split(r"[,\n]", v))
+                                      if a.strip()}
+                elif key in ("nodes", "brokers"):
+                    spec[key] = [x.strip() for x in v.split(",") if x.strip()]
+                else:
+                    spec[key] = v
+            elif k.startswith("secret.") and v:
+                creds[k[7:]] = SecretStr(v)
+        if not kind:
+            raise ValueError("choose what you are connecting")
+        try:
+            return SourceRequest(name=f.get("name", ""), type=kind, spec=spec, secret=creds,
+                                 description=f.get("description", ""), preset=preset if preset in PRESETS else "")
+        except ValidationError as e:
+            raise ValueError("; ".join(f"{err['loc'][-1]}: {err['msg']}" for err in e.errors())) from None
+
+    @api.get("/sources", response_class=HTMLResponse)
+    def sources_page(request: Request):
+        s = need(request)
+        p = platform_for(s)
+        listed = _safe(p.sources)
+        return render(request, "sources.html", s, rows=listed if isinstance(listed, list) else [],
+                      sources_error=listed.get("error") if isinstance(listed, dict) else None,
+                      presets=list(PRESETS.values()))
+
+    @api.get("/sources/new", response_class=HTMLResponse)
+    def source_new_page(request: Request, preset: str = "", type: str = ""):
+        s = need(request)
+        p = platform_for(s)
+        kind = type or (PRESETS[preset].type if preset in PRESETS else "")
+        return source_page(request, s, p, {"preset": preset if preset in PRESETS else "", "type": kind,
+                                          "name": preset.replace("-", "") if preset in PRESETS else ""})
+
+    @api.post("/sources/new", response_class=HTMLResponse)
+    async def source_new(request: Request):
+        s = need(request)
+        raw = await request.form()
+        check_csrf(s, str(raw.get("csrf", "")))
+        form = {k: v for k, v in raw.items() if k != "csrf"}
+        p = platform_for(s)
+        try:
+            req = parse_source(form, p)
+            done = p.add_source(req)
+        except (ValueError, PlatformError, DataOSError) as e:
+            return source_page(request, s, p, form, error_text=redact(str(e)), status=400)
+        return back(request, f"/pipelines/new?source={done['name']}",
+                    msg=f"Connected {done['name']}. Its credentials are in Secret {done['secret']}, yours only. "
+                        f"Now say what to bring in.")
+
+    @api.post("/sources/{name}/creds")
+    async def source_creds(request: Request, name: str):
+        s = need(request)
+        raw = await request.form()
+        check_csrf(s, str(raw.get("csrf", "")))
+        creds: dict[str, SecretStr] = {}
+        try:
+            url = str(raw.get("url", "")).strip()
+            if url:
+                creds = {k: SecretStr(v) for k, v in from_url(url)[2].items()}
+            for k, v in raw.items():
+                if k.startswith("secret.") and str(v).strip():
+                    creds[k[7:]] = SecretStr(str(v).strip())
+            platform_for(s).replace_source_credentials(name, creds)
+        except (ValueError, PlatformError, DataOSError) as e:
+            return back(request, "/sources", err=redact(str(e)))
+        return back(request, "/sources", msg=f"Replaced the credentials of {name}. Pipelines use them from their next run.")
+
+    @api.post("/sources/{name}/delete")
+    def source_delete(request: Request, name: str, confirm: str = Form(""), keep_secret: str = Form(""),
+                      csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        if confirm != name:
+            return back(request, "/sources", err=f"Type {name} to confirm")
+        try:
+            out = platform_for(s).delete_source(name, keep_secret=bool(keep_secret))
+        except (PlatformError, DataOSError) as e:
+            return back(request, "/sources", err=str(e))
+        extra = f" These pipelines used it: {', '.join(out['pipelines_affected'])}." if out["pipelines_affected"] else ""
+        return back(request, "/sources", msg=f"Removed {name}" + (" and its credentials." if out["secret_deleted"] else ".") + extra)
 
     # ------------------------------------------------------------------ Claude Code (one per person)
     # Everyone deploys their own: its pod runs as them (DataOS gives it their identity), so what it deploys is theirs, nobody else can

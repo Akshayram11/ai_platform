@@ -40,10 +40,47 @@ Rules the code follows so a pipeline doesn't go wrong:
 - CDC on PostgreSQL gets its own replication slot and publication (`dapp_<name>`); `topic.prefix` is the pipeline name.
 - Streams get `run_in_loop: true` and no schedule; catalog pipelines get no sink.
 - **Run again** deletes and re-creates the pipeline: DataOS does not run an unchanged pipeline again when it is re-applied (tested).
-- **Delete** stops and removes the pipeline. Data it wrote stays in the destination (Nilus does not drop tables).
+- **Delete** stops and removes the pipeline. The delete box lists what else could go, each unticked by default, and says why
+  something must stay:
+  - **Its table** in the Lakehouse (shows the rows and size; `dapp pipeline rm NAME --drop-table`). Dropped through the Lakehouse's
+    Iceberg catalog (`DELETE .../tables/<t>?purgeRequested=true`) as you, so DataOS decides whether you may; it can't be undone.
+    It is offered only when you own the pipeline, one of its successful runs wrote exactly that table, and no other pipeline writes it
+    (so a table that `dest_table` merely points at, or one shared with another pipeline, is never dropped). The page and the platform
+    both check this, not just the page. Only Lakehouse Depots served by the DataOS catalog (`/lh/...`) can be checked or dropped from here.
+  - **The source you connected** for it (`--remove-source`): its Depot, Secret and grants, when you connected it with dapp and no other
+    pipeline uses it.
+  - Always stays: Nilus's record of past runs, the empty schema in the Lakehouse, and any Depot access that people were given.
+  `dapp pipeline leftovers NAME` shows the same list.
 
 Customize: mask columns (`email=hash, phone=partial:3, ssn=redact`), skip columns, a row limit for a first try, catalog depth, compute,
 CPU and memory.
+
+## Sources: connect a system that has no Depot yet
+
+A pipeline starts from a Depot. For a system that isn't one yet (Supabase, your own PostgreSQL or MySQL, Snowflake, MongoDB...),
+open **Pipelines → Connect a source** (`/dapp/sources`, or `dapp source add`). Pick what it is (Supabase and a few others are one
+click; or choose any Depot type DataOS has) and paste a connection string or fill the boxes. The fields come from DataOS's own
+definition of each Depot type (`GET /ds/api/v2/types`), so every type works, not a hand-written list.
+
+What it makes, in this order, all as you and all owned by you:
+1. a **Secret** `dapp-src-<name>` with the credentials;
+2. **Can Use** on that Secret for you only (DataOS requires it, even for the creator, and audits it);
+3. a **Depot** `<name>` of that type, pointing at the Secret;
+4. **Can Use** on the Depot for you only.
+If a step fails, what was already made is removed. Then the pipeline form opens with that Depot chosen.
+
+Credentials: typed into password boxes (or `dapp source add --url-env VAR`, `--secret-env FIELD=VAR`, `--secret-file FIELD=PATH`;
+never a command-line argument), sent straight to DataOS, and never stored by the dashboard, written to a log, or shown on a page
+again, not even after an error (the boxes come back empty, and messages are scrubbed). **Replace credentials** after a password
+change; **Remove source** deletes the Depot, the Secret (unless you keep it) and the grants.
+
+Governance: connecting grants access only to you. Later, another person asks to use your Depot with **Request access** and you (or a
+tenant admin) approve it; approving gives them the Depot and the Secret behind it. So **connect with a separate read-only user** on
+the source, not your own account.
+
+Supabase: use the **Session pooler** connection string (port 5432, host `aws-0-<region>.pooler.supabase.com`, user
+`postgres.<project>`) with the database password, not the direct `db.<project>.supabase.co` host (IPv6 only) or the transaction
+pooler (port 6543). The preset adds `sslmode=require`.
 
 ## Access is governed
 
@@ -84,5 +121,5 @@ and `/stats?period=7d`, with the person's own token. Log: Poros `/resources/nilu
 
 ## Not yet
 - An MCP tool so AI apps and agents can preview and request pipelines (never approve).
-- Direct-URI sources without a Depot (Databricks, IBM Db2, NATS) and custom sources.
+- Direct-URI sources without a Depot (Databricks, IBM Db2, NATS) and custom API sources: see [nilus-custom-sources.md](nilus-custom-sources.md) (parked).
 - Picking tables from a list instead of typing them.

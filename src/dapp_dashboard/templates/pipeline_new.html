@@ -36,7 +36,7 @@
       <option value="">Choose…</option>
       {% for d in depots if d.modes %}<option value="{{ d.name }}" {{ 'selected' if form.source_depot == d.name }}>{{ d.name }} · {{ d.label }}</option>{% endfor %}
     </select>
-    <span class="muted" style="font-size:12px">Depots are DataOS connections; ask a tenant admin to add one for a new system.</span>
+    <span class="muted" style="font-size:12px">Not in the list? <a href="{{ root }}/sources/new">Connect a new source</a> (Supabase, PostgreSQL, MySQL, Snowflake…) first.</span>
   </label>
   <label id="objlabel"><span id="objword">Table</span>
     <input name="source_object" value="{{ form.source_object }}" placeholder="public.orders" id="obj">

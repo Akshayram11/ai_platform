@@ -33,6 +33,7 @@ from .pipelines import (
     PipelineRequest,
     build_manifest,
     check,
+    depot_kind,
     depot_secrets,
     depot_summary,
     describe,
@@ -42,6 +43,16 @@ from .pipelines import (
     run_row,
 )
 from .pipelines import summary as pipeline_summary
+from .sources import (
+    SOURCE_TAG,
+    SourceRequest,
+    SourceType,
+    depot_manifest,
+    parse_types,
+    redact,
+    secret_manifest,
+)
+from .sources import check as check_source
 from .spec import (
     ALLOWED_ROLES_ENV,
     ALLOWED_USERS_ENV,
@@ -65,6 +76,13 @@ log = logging.getLogger("dapp.platform")
 
 class PlatformError(RuntimeError):
     pass
+
+
+def _safe_list(fn) -> list[dict[str, Any]]:
+    try:
+        return fn()
+    except (PlatformError, DataOSError):
+        return []
 
 
 class PipelineAccessError(PlatformError):
@@ -522,9 +540,105 @@ class Platform:
         self._apply_pipeline(manifest)
         return {"name": name}
 
-    def delete_pipeline(self, name: str) -> dict[str, Any]:
-        self.pipeline(name)
-        return {"name": name, "output": self.writer.delete("nilus", name)}
+    # ---- what a pipeline leaves behind, and removing it with the pipeline ----
+    def _lakehouse_rel(self, depot: dict[str, Any]) -> str | None:
+        """The Iceberg catalog's path on the DataOS host (e.g. /lh/engineering/s3lhspark), for a Lakehouse Depot served there."""
+        rel = str(((depot.get("spec") or {}).get("spec") or {}).get("metastoreRelativePath") or "")
+        return rel.rstrip("/") if depot_kind(depot) == "lakehouse" and rel.startswith("/lh/") else None
+
+    @staticmethod
+    def _table_parts(table: str) -> tuple[str, str] | None:
+        ns, _, name = (table or "").partition(".")
+        return (ns, name) if ns and name and "." not in name else None
+
+    def lakehouse_table(self, depot_name: str, table: str) -> dict[str, Any]:
+        """Does the table exist in the Lakehouse, and how big is it (rows, bytes)? Read-only."""
+        depot = self.depot(depot_name)
+        rel, parts = self._lakehouse_rel(depot), self._table_parts(table)
+        if rel is None or parts is None:
+            return {"exists": None, "why": "this destination can't be checked from here"}
+        r = self.client._call("get", f"{rel}/v1/namespaces/{parts[0]}/tables/{parts[1]}")
+        if r.status_code == 404:
+            return {"exists": False}
+        if not r.is_success:
+            raise PlatformError(f"could not read table {table}: HTTP {r.status_code}")
+        meta = r.json().get("metadata") or {}
+        snaps = meta.get("snapshots") or []
+        snap = next((x for x in snaps if x.get("snapshot-id") == meta.get("current-snapshot-id")), snaps[-1] if snaps else {})
+        summ = snap.get("summary") or {}
+        num = lambda k: int(summ[k]) if str(summ.get(k, "")).isdigit() else None
+        return {"exists": True, "rows": num("total-records"), "bytes": num("total-files-size"), "files": num("total-data-files")}
+
+    def pipeline_leftovers(self, name: str) -> dict[str, Any]:
+        """What deleting this pipeline can also remove, and what must stay. Only things this person may remove are offered."""
+        res = self.pipeline(name)
+        row = pipeline_summary(res)
+        mine = res.get("owner") == self.ctx.user_id
+        others = [p for p in self.pipelines() if p["name"] != name]
+        out: dict[str, Any] = {"name": name, "mine": mine, "table": None, "source": None, "runs_stay": True}
+        if row["dest"] and row["dest_table"]:
+            writers = [p["name"] for p in others if p["dest"] == row["dest"] and p["dest_table"] == row["dest_table"]]
+            wrote = any(r["ok"] and r["dest"] == row["dest_table"] for r in _safe_list(lambda: self.pipeline_runs(name, limit=50)))
+            info: dict[str, Any] = {"depot": row["dest"], "table": row["dest_table"], "shared_with": writers}
+            try:
+                info.update(self.lakehouse_table(row["dest"], row["dest_table"]))
+            except (PlatformError, DataOSError) as e:
+                info.update({"exists": None, "why": str(e)})
+            info["can_drop"] = bool(mine and info.get("exists") and wrote and not writers)
+            if info["exists"] and not info["can_drop"]:
+                info["why"] = ("someone else owns this pipeline" if not mine else
+                               f"pipeline(s) {', '.join(writers)} also write it" if writers else
+                               "this pipeline has not written it successfully, so it is not ours to drop")
+            out["table"] = info
+        if row["source"]:
+            try:
+                d = self.depot(row["source"])
+            except PlatformError:
+                d = None
+            if d and SOURCE_TAG in (d.get("tags") or []) and d.get("owner") == self.ctx.user_id:
+                users = [p["name"] for p in others if row["source"] in (p["source"], p["dest"])]
+                out["source"] = {"depot": row["source"], "shared_with": users, "can_remove": mine and not users}
+        return out
+
+    def delete_pipeline(self, name: str, *, drop_table: bool = False, remove_source: bool = False) -> dict[str, Any]:
+        """Delete the pipeline; optionally also its destination table in the Lakehouse and the source connection dapp made for it.
+        The extras are checked again here (not only in the page): the table must exist, this pipeline must have written it, nobody
+        else may write it, and the caller must own the pipeline. The pipeline goes first, so nothing writes while the table goes."""
+        left = self.pipeline_leftovers(name) if (drop_table or remove_source) else None
+        if drop_table and not (left and left["table"] and left["table"]["can_drop"]):
+            why = ((left or {}).get("table") or {}).get("why") or "it is not this pipeline's to drop"
+            raise PlatformError(f"won't drop the table: {why}")
+        if remove_source and not (left and left["source"] and left["source"]["can_remove"]):
+            raise PlatformError("won't remove the source: it isn't one you connected, or other pipelines still use it")
+        out: dict[str, Any] = {"name": name, "output": self.writer.delete("nilus", name), "table_dropped": None,
+                               "source_removed": None, "problems": []}
+        if drop_table and left:
+            t = left["table"]
+            try:
+                out["table_dropped"] = self.drop_lakehouse_table(t["depot"], t["table"])
+            except (PlatformError, DataOSError) as e:
+                out["problems"].append(f"the pipeline is deleted, but its table {t['table']} could not be dropped: {e}")
+        if remove_source and left:
+            try:
+                out["source_removed"] = self.delete_source(left["source"]["depot"])["name"]
+            except (PlatformError, DataOSError) as e:
+                out["problems"].append(f"the pipeline is deleted, but the source could not be removed: {e}")
+        return out
+
+    def drop_lakehouse_table(self, depot_name: str, table: str) -> str:
+        """DROP TABLE with purge, through the Iceberg catalog, as the signed-in person (DataOS decides if they may)."""
+        depot = self.depot(depot_name)
+        rel, parts = self._lakehouse_rel(depot), self._table_parts(table)
+        if rel is None or parts is None:
+            raise PlatformError("this destination can't be dropped from here")
+        r = self.client._call("delete", f"{rel}/v1/namespaces/{parts[0]}/tables/{parts[1]}", params={"purgeRequested": "true"})
+        if r.status_code == 404:
+            return f"{table} was already gone"
+        if r.status_code in (401, 403):
+            raise PlatformError(f"you may not drop {table} in {depot_name} (DataOS refused)")
+        if not r.is_success:
+            raise PlatformError(f"HTTP {r.status_code} from the catalog")
+        return f"dropped {depot_name} {table}"
 
     def pipeline_logs(self, name: str, *, tail: int = 200) -> str:
         logs = self.client.logs("nilus", name, tail=tail)
@@ -559,32 +673,134 @@ class Platform:
             return False
         return f"roles:id:{self.ctx.tenant}-tenant-admin" in tags
 
+    def _access_grants(self, depot_name: str, user: str, secret_ids: list[str], note: str, *,
+                       depot: bool = True) -> list[dict[str, Any]]:
+        """DataOS grants letting ONE person use ONE Depot (use-specific-depot) and its Secrets (use-specific-secret)."""
+        who = subject_for(user)
+        safe = "".join(c if c.isalnum() else "-" for c in user.split(":")[-1].lower())[:24]
+        tags = ["governance", "grant", DAPP_TAG, "dapp-depot-access", f"dapp-depot-{depot_name}"]
+        base = {"version": "v2alpha", "type": "grant", "tenant": self.ctx.tenant, "tags": tags, "description": note[:240]}
+        tail = pysecrets.token_hex(2)
+        grants = []
+        if depot:
+            grants.append({**base, "name": f"dapp-depot-{depot_name}-{safe}-{tail}"[:63].rstrip("-"),
+                           "grant": {"policy_use_case_id": "use-specific-depot", "subjects": [who],
+                                     "values": {"depot-access": [{"depot": depot_name}]}, "collection": self.ctx.tenant,
+                                     "requester": self.ctx.user_id or "unknown", "notes": note, "approve": True}})
+        if secret_ids:
+            grants.append({**base, "name": f"dapp-depotsec-{depot_name}-{safe}-{tail}"[:63].rstrip("-"),
+                           "grant": {"policy_use_case_id": "use-specific-secret", "subjects": [who],
+                                     "values": {"read-specific-secret-governance": [{"id": s} for s in secret_ids]},
+                                     "collection": "system", "requester": self.ctx.user_id or "unknown", "notes": note,
+                                     "approve": True}})
+        return grants
+
     def grant_depot_access(self, depot_name: str, user: str, *, reason: str = "") -> dict[str, Any]:
         """Let ONE person use ONE Depot and the Secrets behind it (Can Use), as DataOS grants. Only for an approved request:
         the caller must own the Depot or be a tenant admin. Never use-any-depots / use-any-secret."""
         depot = self.depot(depot_name)
         if not self.can_grant(depot):
             raise PlatformError(f"only the owner of Depot {depot_name} or a tenant admin can grant access to it")
-        who = subject_for(user)
-        safe = "".join(c if c.isalnum() else "-" for c in user.split(":")[-1].lower())[:24]
         note = f"dapp: {user} may use Depot {depot_name}" + (f" ({reason[:120]})" if reason else "") + \
                f", approved by {self.ctx.user_id}"
-        tags = ["governance", "grant", DAPP_TAG, "dapp-depot-access", f"dapp-depot-{depot_name}"]
-        base = {"version": "v2alpha", "type": "grant", "tenant": self.ctx.tenant, "tags": tags, "description": note[:240]}
-        tail = pysecrets.token_hex(2)
-        grants = [{**base, "name": f"dapp-depot-{depot_name}-{safe}-{tail}"[:63].rstrip("-"),
-                   "grant": {"policy_use_case_id": "use-specific-depot", "subjects": [who],
-                             "values": {"depot-access": [{"depot": depot_name}]}, "collection": self.ctx.tenant,
-                             "requester": self.ctx.user_id or "unknown", "notes": note, "approve": True}}]
         secrets_ = depot_secrets(depot)
-        if secrets_:
-            grants.append({**base, "name": f"dapp-depotsec-{depot_name}-{safe}-{tail}"[:63].rstrip("-"),
-                           "grant": {"policy_use_case_id": "use-specific-secret", "subjects": [who],
-                                     "values": {"read-specific-secret-governance": [{"id": s} for s in secrets_]},
-                                     "collection": "system", "requester": self.ctx.user_id or "unknown", "notes": note,
-                                     "approve": True}})
+        grants = self._access_grants(depot_name, user, secrets_, note)
         self._write(*grants)
         return {"depot": depot_name, "user": user, "grants": [g["name"] for g in grants], "secrets": secrets_}
+
+    # ---------- connecting a new source: a Secret with the credentials, a Depot on top (both the caller's) ----------
+    def source_types(self) -> dict[str, SourceType]:
+        r = self.client._call("get", "/ds/api/v2/types")
+        if not r.is_success:
+            raise PlatformError(f"could not read the Depot types from DataOS: HTTP {r.status_code}")
+        return parse_types(r.json())
+
+    def sources(self) -> list[dict[str, Any]]:
+        """The sources this person connected with dapp (Depots tagged dapp-source that they own)."""
+        rows = self.client.list_resources("depot", owner=self.ctx.user_id, tags=[SOURCE_TAG], details=True)
+        return [{**depot_summary(d), "secret": next(iter(depot_secrets(d)), None), "created": d.get("created")}
+                for d in rows if d.get("owner") in (None, self.ctx.user_id)]
+
+    def _own_source(self, name: str) -> dict[str, Any]:
+        d = self.depot(name)
+        if SOURCE_TAG not in (d.get("tags") or []) or d.get("owner") != self.ctx.user_id:
+            raise PlatformError(f"{name} is not a source you connected with dapp")
+        return d
+
+    def add_source(self, req: SourceRequest, *, patience: float = 60, every: float = 3) -> dict[str, Any]:
+        """Secret (credentials) -> Can Use on it for yourself -> Depot -> Can Use on it for yourself. All as the caller,
+        on resources the caller creates and owns (DataOS requires the self-grant, and audits it). On any failure the
+        pieces already made are removed, and the message has the credentials taken out."""
+        stype = self.source_types().get(req.type)
+        errs = check_source(req, stype)
+        if errs:
+            raise PlatformError("; ".join(errs))
+        assert stype is not None
+        if self.client.get_resource("depot", req.name) is not None:
+            raise PlatformError(f"a Depot named {req.name} already exists: pick another name")
+        existing = self.client.get_resource("secret", req.secret_name)
+        if existing is not None and existing.get("owner") != self.ctx.user_id:
+            raise PlatformError(f"a Secret named {req.secret_name} belongs to someone else: pick another name")
+        api = ApiWriter(self.client)             # never dataos-ctl here: its output could echo the Secret
+        tenant, me = self.ctx.tenant, self.ctx.user_id or ""
+        note = f"dapp: {me} connected source {req.name} and may use it"
+        made: list[tuple[str, str]] = []
+        try:
+            api.apply(secret_manifest(req, tenant))
+            made.append(("secret", req.secret_name))
+            for g in self._access_grants(req.name, me, [f"{tenant}:{req.secret_name}"], note, depot=False):
+                api.apply(g)
+                made.append(("grant", g["name"]))
+            depot = depot_manifest(req, stype, tenant)
+            deadline = time.monotonic() + patience
+            while True:                             # a fresh grant can take a few seconds to count
+                try:
+                    api.apply(depot)
+                    break
+                except DataOSError as e:
+                    if "not-allowed" not in str(e) or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(every)
+            made.append(("depot", req.name))
+            for g in self._access_grants(req.name, me, [], note):
+                api.apply(g)
+                made.append(("grant", g["name"]))
+        except Exception as e:
+            for kind, name in reversed(made):
+                try:
+                    self.client.delete_resource(kind, name)
+                except DataOSError:
+                    log.warning("could not remove %s %s after a failed connect", kind, name)
+            raise PlatformError(f"Could not connect {req.name}: {redact(str(e), req)}") from None
+        return {"name": req.name, "type": stype.name, "secret": req.secret_name,
+                "grants": [n for k, n in made if k == "grant"]}
+
+    def replace_source_credentials(self, name: str, secret: dict[str, Any]) -> dict[str, Any]:
+        d = self._own_source(name)
+        req = SourceRequest(name=name, type=depot_kind(d), secret=secret)
+        stype = self.source_types().get(req.type)
+        missing = [f.key for f in (stype.fields if stype else ()) if f.side == "secret" and f.required
+                   and not (req.secret.get(f.key) and req.secret[f.key].get_secret_value())]
+        if missing:
+            raise PlatformError(f"give all the credentials again: {', '.join(missing)} missing")
+        try:
+            ApiWriter(self.client).apply(secret_manifest(req, self.ctx.tenant))
+        except DataOSError as e:
+            raise PlatformError(redact(str(e), req)) from None
+        return {"name": name, "secret": req.secret_name}
+
+    def delete_source(self, name: str, *, keep_secret: bool = False) -> dict[str, Any]:
+        """Remove the Depot, its Secret (the credentials) and the dapp grants on it. Pipelines using it stop working."""
+        self._own_source(name)
+        users = [p["name"] for p in self.pipelines() if name in (p.get("source"), p.get("dest"))]
+        self.client.delete_resource("depot", name)
+        removed = []
+        for g in self.depot_grants(name):
+            if self.client.delete_resource("grant", g["name"]):
+                removed.append(g["name"])
+        secret = f"dapp-src-{name}"
+        gone = False if keep_secret else self.client.delete_resource("secret", secret)
+        return {"name": name, "secret_deleted": gone, "grants_removed": removed, "pipelines_affected": users}
 
     def depot_grants(self, depot_name: str) -> list[dict[str, Any]]:
         out = []

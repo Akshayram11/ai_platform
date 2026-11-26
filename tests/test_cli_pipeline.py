@@ -42,7 +42,10 @@ def test_pipeline_commands(monkeypatch):
     assert st["runs"][0]["rows"] == 31 and st["stats_7d"]["total_runs"] == 1
     assert "lakehouse" in runner.invoke(cli_app, ["pipeline", "logs", "orders"]).stdout
     assert json.loads(runner.invoke(cli_app, ["--json", "pipeline", "run", "orders"]).stdout) == {"name": "orders"}
+    left = json.loads(runner.invoke(cli_app, ["--json", "pipeline", "leftovers", "orders"]).stdout)
+    assert left["table"]["can_drop"] and left["table"]["rows"] == 31
     no = runner.invoke(cli_app, ["--json", "pipeline", "rm", "orders"])
     assert no.exit_code == 1 and "--yes" in no.stdout
-    assert json.loads(runner.invoke(cli_app, ["--json", "pipeline", "rm", "orders", "--yes"]).stdout)["name"] == "orders"
-    assert ("nilus", "orders") not in fake.store
+    gone = json.loads(runner.invoke(cli_app, ["--json", "pipeline", "rm", "orders", "--yes", "--drop-table"]).stdout)
+    assert gone["name"] == "orders" and gone["table_dropped"] == "dropped lake raw.orders"
+    assert ("nilus", "orders") not in fake.store and ("raw", "orders") not in fake.tables

@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Connect a source · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% block body %}
+<p class="sub" style="margin-bottom:8px"><a href="{{ root }}/sources">← Sources</a></p>
+<h1>Connect a source</h1>
+<p class="sub">Two steps: what it is, and how to reach it. The fields below come from DataOS's own definition of each kind of source.</p>
+
+{% if error_text %}<div class="flash err">{{ error_text }}<br><span class="muted" style="font-size:12px">For your safety the credential boxes were emptied; type them again.</span></div>{% endif %}
+{% if types_error %}<div class="flash err">{{ types_error }}. Try again in a minute.</div>{% endif %}
+
+<form method="post" action="{{ root }}/sources/new" id="sf" autocomplete="off">
+<input type="hidden" name="csrf" value="{{ s.csrf }}">
+
+<h2>1. What are you connecting?</h2>
+<div class="panel">
+  <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:10px">
+    {% for pr in presets %}
+    <label class="pick" style="flex-direction:row;gap:6px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:6px 10px">
+      <input type="radio" name="preset" value="{{ pr.key }}" {{ 'checked' if form.preset == pr.key }}> {{ pr.title }}</label>
+    {% endfor %}
+    <label class="pick" style="flex-direction:row;gap:6px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:6px 10px">
+      <input type="radio" name="preset" value="" {{ 'checked' if not form.preset }}> Other</label>
+  </div>
+  <label id="typebox">Kind of source
+    <select name="type" id="type">
+      <option value="">Choose…</option>
+      {% for t in fields %}<option value="{{ t }}" {{ 'selected' if form.type == t }}>{{ t }}</option>{% endfor %}
+    </select></label>
+  <p class="muted" id="hint" style="margin:8px 0 0;font-size:12.5px"></p>
+</div>
+
+<h2>2. How to reach it</h2>
+<div class="panel fields">
+  <label>Name in DataOS<input name="name" value="{{ form.name }}" placeholder="supabase" required pattern="[a-z][a-z0-9]{2,31}">
+    <span class="muted" style="font-size:12px">Becomes the Depot name: 3-32 lower-case letters and digits, no '-'.</span></label>
+  <label id="urlbox">Connection string
+    <input type="password" name="url" id="url" placeholder="postgresql://user:password@host:5432/database" autocomplete="new-password">
+    <span class="muted" style="font-size:12px">Paste it and leave the boxes below empty, or fill the boxes instead. A password with @ : / must be URL-encoded in the string.</span></label>
+  <div id="specfields" class="fields" style="display:contents"></div>
+  <div id="secretfields" class="fields" style="display:contents"></div>
+  <label>Description (optional)<input name="description" value="{{ form.description }}" placeholder="what it holds"></label>
+</div>
+
+<div class="row" style="margin-top:14px">
+  <button class="primary">Connect</button>
+  <span class="muted" style="font-size:12px;align-self:center">Creates a Secret with the credentials and a Depot, both yours, and lets you (only you) use them.
+  Then you choose what to bring in.</span>
+</div>
+</form>
+
+<div class="panel muted" style="font-size:12.5px;margin-top:18px">
+<b>Credentials</b> go straight into a DataOS Secret owned by you. This page never stores, logs or shows them again. Prefer a separate
+read-only user on the source: if you later let someone use this source, they can read that Secret too.
+</div>
+
+<script>
+(function () {
+  const fields = {{ fields_json|safe }}, presets = {{ presets_json|safe }};
+  const kept = {{ form|tojson }};
+  const typeSel = document.getElementById('type');
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  function box(f) {
+    const name = (f.side === 'spec' ? 'spec.' : 'secret.') + f.key;
+    const label = f.key.replace(/_/g, ' ') + (f.required ? '' : ' (optional)');
+    const val = f.side === 'spec' ? (kept[name] ?? f.default ?? '') : '';
+    const type = f.kind === 'password' ? 'password' : (f.kind === 'int' ? 'number' : 'text');
+    const help = f.kind === 'params' ? 'key=value, comma separated, e.g. sslmode=require' :
+                 (f.key === 'nodes' || f.key === 'brokers') ? 'host:port, comma separated' : '';
+    const input = f.kind === 'file'
+      ? `<textarea name="${name}" rows="3" placeholder="paste the file's contents"></textarea>`
+      : `<input type="${type}" name="${name}" value="${esc(val)}" ${type === 'password' ? 'autocomplete="new-password"' : ''}>`;
+    return `<label>${esc(label)}${input}${help ? `<span class="muted" style="font-size:12px">${help}</span>` : ''}</label>`;
+  }
+  function sync() {
+    const preset = document.querySelector('input[name=preset]:checked').value;
+    if (preset && presets[preset]) typeSel.value = presets[preset].type;
+    document.getElementById('typebox').style.display = preset ? 'none' : '';
+    const t = typeSel.value, fs = fields[t] || [];
+    document.getElementById('hint').textContent = preset && presets[preset] ? presets[preset].hint +
+      (Object.keys(presets[preset].params).length ? ' Adds ' + Object.entries(presets[preset].params).map(([k, v]) => k + '=' + v).join(', ') + '.' : '') : '';
+    document.getElementById('urlbox').style.display = ['postgresql', 'mysql', 'mongodb'].includes(t) ? '' : 'none';
+    document.getElementById('specfields').innerHTML = fs.filter(f => f.side === 'spec' && f.key !== 'subprotocol').map(box).join('') +
+      fs.filter(f => f.key === 'subprotocol').map(f => `<input type="hidden" name="spec.subprotocol" value="${esc(f.default || t)}">`).join('');
+    document.getElementById('secretfields').innerHTML = fs.filter(f => f.side === 'secret').map(box).join('');
+  }
+  document.querySelectorAll('input[name=preset]').forEach(r => r.addEventListener('change', sync));
+  typeSel.addEventListener('change', sync);
+  sync();
+})();
+</script>
+{% endblock %}

@@ -99,13 +99,17 @@ def test_pipelines_tab_end_to_end(monkeypatch, tmp_path):
         assert done.status_code == 200 and "Started: Keep up to date" in done.text and "Runs" in done.text
         assert fakes["alice"].store[("nilus", "orders")]["spec"]["schedule"]["crons"] == ["0 * * * *"]
         detail = c.get("/pipelines/orders").text
-        for needle in ("completed", "31", "16.8", "Run again now", "Delete pipeline", "0 * * * *", "type: nilus"):
+        for needle in ("completed", "31", "16.8", "Run again now", "Delete this pipeline", "0 * * * *", "type: nilus"):
             assert needle in detail, needle
         assert "orders" in c.get("/pipelines").text
 
+        assert "also drop" in detail and "<b>31</b> rows" in detail and "can&#39;t be undone" in detail.replace("can't", "can&#39;t")
+        assert "Nilus keeps the record of past runs" in detail and "#delete" in c.get("/pipelines").text
         again = c.post("/pipelines/orders/run", data={"csrf": csrf})
         assert "Running again" in again.text and ("nilus", "orders") in fakes["alice"].store
         assert "Type orders to confirm" in c.post("/pipelines/orders/delete", data={"csrf": csrf, "confirm": "x"}).text
-        gone = c.post("/pipelines/orders/delete", data={"csrf": csrf, "confirm": "orders"})
-        assert "Deleted orders" in gone.text and ("nilus", "orders") not in fakes["alice"].store
+        assert ("raw", "orders") in fakes["alice"].tables
+        gone = c.post("/pipelines/orders/delete", data={"csrf": csrf, "confirm": "orders", "drop_table": "1"})
+        assert "Deleted orders." in gone.text and "Dropped lake raw.orders" in gone.text
+        assert ("nilus", "orders") not in fakes["alice"].store and ("raw", "orders") not in fakes["alice"].tables
         assert c.get("/pipelines/orders").status_code == 404

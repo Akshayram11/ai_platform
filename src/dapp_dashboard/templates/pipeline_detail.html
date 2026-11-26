@@ -58,11 +58,35 @@ the source or destination system (its admin fixes that); "not found" usually mea
     <span class="muted" style="font-size:12px;align-self:center">Starts a new run with the same settings{% if r.cron %}; the schedule carries on{% endif %}.</span>
   </form>
   {% endif %}
-  <form class="row" method="post" action="{{ root }}/pipelines/{{ r.name }}/delete">
+  <h3 id="delete" style="margin:6px 0 8px;font-size:14px">Delete this pipeline</h3>
+  <form method="post" action="{{ root }}/pipelines/{{ r.name }}/delete">
     <input type="hidden" name="csrf" value="{{ s.csrf }}">
-    <input name="confirm" placeholder="type {{ r.name }}" size="24">
-    <button class="danger">Delete pipeline</button>
-    <span class="muted" style="font-size:12px;align-self:center">Stops it and removes it. Data it already wrote stays in the destination.</span>
+    <p class="muted" style="margin:0 0 8px;font-size:13px">What happens, so nothing is a surprise:</p>
+    <table><tbody>
+      <tr><td style="width:34%"><b>The pipeline</b></td><td>Stopped and removed. A scheduled one will not run again.</td><td style="width:1%"><span class="pill ok">always</span></td></tr>
+      {% if left and left.table %}
+      <tr><td><b>Its table</b><div class="muted" style="font-size:11.5px"><code>{{ left.table.depot }}</code> · {{ left.table.table }}</div></td>
+        <td>{% if left.table.exists %}Holds {% if left.table.rows is number %}<b>{{ left.table.rows|num }}</b> rows{% else %}data{% endif %}{% if left.table.bytes is number %} ({{ left.table.bytes|bytes }}){% endif %}.
+            {% if left.table.can_drop %}Tick to drop the table and its files too. <b>This can't be undone.</b>
+            {% else %}<span class="muted">Stays: {{ left.table.why }}.</span>{% endif %}
+            {% elif left.table.exists == false %}<span class="muted">It doesn't exist (any more): nothing to drop.</span>
+            {% else %}<span class="muted">Stays: {{ left.table.why or "this destination can't be checked from here" }}.</span>{% endif %}</td>
+        <td style="white-space:nowrap">{% if left.table.can_drop %}<label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="drop_table" value="1"> also drop</label>{% else %}<span class="pill">stays</span>{% endif %}</td></tr>
+      {% endif %}
+      {% if left and left.source %}
+      <tr><td><b>The source you connected</b><div class="muted" style="font-size:11.5px"><code>{{ left.source.depot }}</code></div></td>
+        <td>{% if left.source.can_remove %}Removes its Depot, its Secret (the credentials) and the access grants on it. You can connect it again later.
+            {% else %}<span class="muted">Stays: {{ left.source.shared_with|join(', ') }} still use{{ 's' if left.source.shared_with|length == 1 }} it.</span>{% endif %}</td>
+        <td style="white-space:nowrap">{% if left.source.can_remove %}<label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="remove_source" value="1"> also remove</label>{% else %}<span class="pill">stays</span>{% endif %}</td></tr>
+      {% endif %}
+      <tr><td><b>Run history</b></td><td class="muted">Nilus keeps the record of past runs; it can't be deleted.</td><td><span class="pill">stays</span></td></tr>
+      <tr><td><b>Other people's access</b></td><td class="muted">Access to Depots that you or others were given is not touched here: <a href="{{ root }}/pipelines">Pipelines</a> lists the requests.</td><td><span class="pill">stays</span></td></tr>
+    </tbody></table>
+    <div class="row" style="margin-top:10px">
+      <input name="confirm" placeholder="type {{ r.name }}" size="24">
+      <button class="danger">Delete</button>
+      <span class="muted" style="font-size:12px;align-self:center">Only what is ticked besides the pipeline goes.</span>
+    </div>
   </form>
 </div>
 {% endif %}
