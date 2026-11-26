@@ -6,6 +6,8 @@ quick start; these pages go deeper.
 | Page | Read it for |
 |---|---|
 | [architecture.md](architecture.md) | The pieces and how a request moves between them |
+| [pipelines.md](pipelines.md) | The Pipelines tab and `dapp pipeline`: move data with Nilus in plain words, governed Depot access |
+| [nilus-notes.md](nilus-notes.md) | What we tested live about Nilus: permissions, purposes, runs API, re-run behaviour |
 | [models.md](models.md) | The Models tab: deploy a small model in a few clicks, every setting in Customize, use and delete it |
 | [llm-gateway.md](llm-gateway.md) | App and personal LLM keys, usage metering, the in-DataOS model `small` |
 | [immortal-obj.md](immortal-obj.md) | Durable per-person and per-app storage (the Durable Objects equivalent) |

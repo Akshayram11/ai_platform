@@ -142,12 +142,12 @@ def test_the_agent_guide_only_uses_commands_that_exist(fake):
 
     guide = (Path(__file__).resolve().parents[1] / "apps" / "claude-code" / "CLAUDE.md").read_text()
     # a command is `dapp ...` at the start of a line, after a backtick, `&& `, `| ` or `: ` (not "dapp" in prose)
-    found = re.findall(r"(?:^[ ]*|[`:|] ?|&& )dapp (?:--json )?((?:(?:model|access|keys|llm-key|tool|secret) )?[a-z][\w-]*)", guide, re.MULTILINE)
+    found = re.findall(r"(?:^[ ]*|[`:|] ?|&& )dapp (?:--json )?((?:(?:model|pipeline|access|keys|llm-key|tool|secret) )?[a-z][\w-]*)", guide, re.MULTILINE)
     seen = {tuple(f.split()) for f in found}
     assert {("model", "catalog"), ("model", "deploy"), ("model", "ls"), ("model", "rm"), ("deploy",), ("init",), ("status",)} <= seen
     for path in seen:
         r = runner.invoke(cli_app, [*path, "--help"])
         assert r.exit_code == 0, f"the guide mentions `dapp {' '.join(path)}`, which doesn't exist"
     for needle in ("low-cost chatbot", "dapp model deploy qwen2.5-0.5b --name small", "dapp init lowcost-bot --template chatbot --model small",
-                   "vulcan_query_submit", "dapp access allow", "Request access", "Models** tab"):
+                   "vulcan_query_submit", "dapp pipeline new", "Never try to grant access yourself", "dapp access allow", "Request access", "Models** tab"):
         assert needle in guide, needle

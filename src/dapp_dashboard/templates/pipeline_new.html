@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}New pipeline · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% block body %}
+<p class="sub" style="margin-bottom:8px"><a href="{{ root }}/pipelines">← Pipelines</a></p>
+<h1>New pipeline</h1>
+<p class="sub">Four questions. The pipeline kind, write strategy and settings follow from your answers; open <i>Customize</i> only if you want to.</p>
+
+{% if error_text %}<div class="flash err">{{ error_text }}</div>{% endif %}
+{% if missing %}
+<div class="panel" style="border-color:var(--warn)">
+  <b>Access needed first.</b> DataOS checked this pipeline as you and found something you may not use yet. Nothing was created.
+  <table style="margin-top:8px"><tbody>
+  {% for m in missing %}
+  <tr><td style="width:30%">{{ m.kind|capitalize }} <code>{{ m.name }}</code></td>
+    <td>{% if m.kind == 'depot' %}
+      <form class="row" method="post" action="{{ root }}/pipelines/request-access" style="margin:0">
+        <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="depot" value="{{ m.name }}">
+        <input name="note" size="40" value="for pipeline {{ form.name }}: {{ form.source_object or 'catalog' }}">
+        <button class="primary">Request access</button>
+      </form>
+      {% else %}<span class="muted">Ask a tenant admin for Can Use on it.</span>{% endif %}</td></tr>
+  {% endfor %}
+  </tbody></table>
+  <p class="muted" style="margin-bottom:0;font-size:12px">The owner of the Depot (or a tenant admin) sees the request on the Pipelines page. Approving it gives you, and only you, Can Use on that Depot and its Secrets.</p>
+</div>
+{% endif %}
+
+<form method="post" action="{{ root }}/pipelines/new" id="pf">
+<input type="hidden" name="csrf" value="{{ s.csrf }}">
+
+<h2>1. Where is the data?</h2>
+<div class="panel fields">
+  <label>Source Depot
+    <select name="source_depot" id="source" required>
+      <option value="">Choose…</option>
+      {% for d in depots if d.modes %}<option value="{{ d.name }}" {{ 'selected' if form.source_depot == d.name }}>{{ d.name }} · {{ d.label }}</option>{% endfor %}
+    </select>
+    <span class="muted" style="font-size:12px">Depots are DataOS connections; ask a tenant admin to add one for a new system.</span>
+  </label>
+  <label id="objlabel"><span id="objword">Table</span>
+    <input name="source_object" value="{{ form.source_object }}" placeholder="public.orders" id="obj">
+    <span class="muted" style="font-size:12px" id="objhint">schema.table, e.g. public.orders</span>
+  </label>
+</div>
+
+<h2>2. How does the data change?</h2>
+<div class="panel" id="hows">
+  {% for h in hows %}
+  <label class="pick" data-how="{{ h.key }}" data-type="{{ h.type }}" data-scheduled="{{ 1 if h.scheduled else 0 }}" data-needs="{{ h.needs|join(',') }}"
+         style="display:flex;gap:10px;align-items:flex-start;padding:8px 4px;flex-direction:row">
+    <input type="radio" name="how" value="{{ h.key }}" {{ 'checked' if form.how == h.key }} style="margin-top:4px">
+    <span><b>{{ h.title }}</b> <span class="pill info" style="font-size:10.5px">{{ h.type }}{% if h.strategy %} · {{ h.strategy }}{% endif %}</span><br>
+      <span class="muted" style="font-size:12.5px">{{ h.detail }}</span></span>
+  </label>
+  {% endfor %}
+  <p class="muted" id="nohow" style="display:none;margin:0">Choose a source Depot first.</p>
+</div>
+
+<div class="panel fields" id="keys">
+  <label id="ik">Column that tells new or changed rows apart<input name="incremental_key" value="{{ form.incremental_key }}" placeholder="updated_at">
+    <span class="muted" style="font-size:12px">Only rows above the last value seen are read next time.</span></label>
+  <label id="pk">Column that identifies a row<input name="primary_key" value="{{ form.primary_key }}" placeholder="id">
+    <span class="muted" style="font-size:12px">Needed to update rows in place; without it they would be duplicated.</span></label>
+</div>
+
+<h2 id="h3">3. Where should it go?</h2>
+<div class="panel fields" id="destpanel">
+  <label>Destination Depot
+    <select name="dest_depot" id="dest">
+      <option value="">Choose…</option>
+      {% for d in depots if d.destination %}<option value="{{ d.name }}" {{ 'selected' if form.dest_depot == d.name }}>{{ d.name }} · {{ d.label }}</option>{% endfor %}
+    </select></label>
+  <label>Table there<input name="dest_table" value="{{ form.dest_table }}" placeholder="raw.orders (default: raw.&lt;table&gt;)"></label>
+</div>
+
+<h2>4. When, and what to call it</h2>
+<div class="panel fields">
+  <label id="when">Runs
+    <select name="schedule" id="schedule">
+      {% for k, w in schedules.items() %}<option value="{{ k }}" {{ 'selected' if form.schedule == k }}>{{ w }}</option>{% endfor %}
+      <option value="custom" {{ 'selected' if form.schedule == 'custom' }}>custom (cron, UTC)</option>
+    </select>
+    <input name="cron" id="cron" value="{{ form.cron }}" placeholder="30 1 * * *" style="margin-top:6px">
+  </label>
+  <p class="muted" id="whennote" style="margin:0"></p>
+  <label>Name<input name="name" value="{{ form.name }}" placeholder="orders-to-lakehouse" required pattern="[a-z][a-z0-9-]{1,46}[a-z0-9]">
+    <span class="muted" style="font-size:12px">Lower-case letters, digits and '-'.</span></label>
+  <label>Description (optional)<input name="description" value="{{ form.description }}" placeholder="said for you if empty"></label>
+</div>
+
+<details class="customize" {{ 'open' if error_text }}>
+<summary>Customize</summary>
+<div class="panel fields">
+  <label>Mask columns<input name="mask" value="{{ form.mask }}" placeholder="email=hash, phone=partial:3, ssn=redact">
+    <span class="muted" style="font-size:12px">hash, redact or partial:N (keep the last N characters).</span></label>
+  <label>Skip columns<input name="exclude_columns" value="{{ form.exclude_columns }}" placeholder="raw_html, debug_payload"></label>
+  <label>Row limit (for a first try)<input name="row_limit" value="{{ form.row_limit }}" placeholder="no limit" inputmode="numeric"></label>
+  <label>Catalog depth
+    <select name="metadata_mode"><option value="shallow" {{ 'selected' if form.metadata_mode == 'shallow' }}>shallow: tables, columns, lineage</option>
+      <option value="deep" {{ 'selected' if form.metadata_mode == 'deep' }}>deep: also profiles, PII tags, usage (heavier)</option></select></label>
+  <label>Compute<input name="compute" value="{{ form.compute }}"></label>
+  <label>CPU<input name="cpu" value="{{ form.cpu }}" size="6"></label>
+  <label>CPU limit<input name="cpu_limit" value="{{ form.cpu_limit }}" size="6"></label>
+  <label>Memory<input name="memory" value="{{ form.memory }}" size="6"></label>
+  <label>Memory limit<input name="memory_limit" value="{{ form.memory_limit }}" size="6"></label>
+</div>
+</details>
+
+{% if plan %}
+<h2>Check before you start</h2>
+<div class="state-big" style="border-color:var(--ok)"><b>{{ plan.describe }}.</b>
+  {% if plan.source %}<br><span class="muted" style="font-size:12.5px">From <code>{{ plan.source.name }}</code> ({{ plan.source.label }}, owner {{ plan.source.owner }}){% if plan.dest %} to <code>{{ plan.dest.name }}</code> ({{ plan.dest.label }}, owner {{ plan.dest.owner }}){% endif %}. It runs as you.</span>{% endif %}</div>
+<details><summary class="muted">The Nilus resource that will be applied</summary><pre>{{ plan_yaml }}</pre></details>
+{% endif %}
+
+<div class="row" style="margin-top:14px">
+  <button name="action" value="preview">Preview</button>
+  <button name="action" value="deploy" class="primary">Deploy and start</button>
+  <span class="muted" style="font-size:12px;align-self:center">Deploying checks your access as you; nothing is created if a Depot is off limits.</span>
+</div>
+</form>
+
+<script>
+(function () {
+  const depots = {{ depot_json|safe }};
+  const src = document.getElementById('source'), hows = [...document.querySelectorAll('[data-how]')];
+  const words = {table: ['Table', 'public.orders', 'schema.table, e.g. public.orders'],
+                 collection: ['Collection', 'shop.orders', 'database.collection'],
+                 topic: ['Topic', 'orders', 'the Kafka topic name']};
+  function show(el, on) { if (el) el.style.display = on ? '' : 'none'; }
+  function sync() {
+    const d = depots[src.value];
+    const modes = d ? d.modes : [];
+    let picked = document.querySelector('input[name=how]:checked');
+    hows.forEach(l => show(l, modes.includes(l.dataset.type)));
+    document.getElementById('nohow').style.display = d ? 'none' : '';
+    if (picked && !modes.includes(picked.closest('[data-how]').dataset.type)) picked.checked = false;
+    picked = document.querySelector('input[name=how]:checked');
+    if (!picked) { const first = hows.find(l => l.style.display !== 'none'); if (first) { first.querySelector('input').checked = true; picked = first.querySelector('input'); } }
+    const w = words[d ? d.object_word : 'table'] || words.table;
+    document.getElementById('objword').textContent = w[0];
+    document.getElementById('obj').placeholder = w[1];
+    document.getElementById('objhint').textContent = w[2];
+    const h = picked ? picked.closest('[data-how]').dataset : {};
+    const meta = h.type === 'metadata', needs = (h.needs || '').split(',');
+    show(document.getElementById('objlabel'), !meta);
+    show(document.getElementById('destpanel'), !meta); show(document.getElementById('h3'), !meta);
+    show(document.getElementById('ik'), needs.includes('incremental_key'));
+    show(document.getElementById('pk'), needs.includes('primary_key'));
+    show(document.getElementById('keys'), needs.includes('incremental_key') || needs.includes('primary_key'));
+    show(document.getElementById('when'), h.scheduled === '1');
+    const sch = document.getElementById('schedule').value;
+    show(document.getElementById('cron'), h.scheduled === '1' && sch === 'custom');
+    document.getElementById('whennote').textContent = h.scheduled === '1' ? '' :
+      (h.type === 'cdc' || h.type === 'stream') ? 'It runs continuously: no schedule.' : 'It runs once, right after you deploy. Run it again from its page whenever you want.';
+  }
+  src.addEventListener('change', sync);
+  document.getElementById('schedule').addEventListener('change', sync);
+  hows.forEach(l => l.querySelector('input').addEventListener('change', sync));
+  sync();
+})();
+</script>
+{% endblock %}

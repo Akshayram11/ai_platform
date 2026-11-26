@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Pipelines · DataOS Apps{% endblock %}
+{% set root = request.scope.root_path %}
+{% block body %}
+<div class="row" style="justify-content:space-between;align-items:end">
+  <div>
+    <h1>Pipelines</h1>
+    <p class="sub" style="margin-bottom:0">Move data between systems with DataOS Nilus, in plain words: say where the data is, where it should go and
+    how it changes. The right pipeline (a one-time copy, a scheduled sync, live change capture, an event stream, or a catalog scan)
+    is chosen for you and starts as soon as you deploy it. From a terminal: <code>dapp pipeline new</code>.</p>
+  </div>
+  <a href="{{ root }}/pipelines/new"><button class="primary">New pipeline</button></a>
+</div>
+
+{% if pipelines_error %}<div class="flash err">Could not list pipelines: {{ pipelines_error }}</div>{% endif %}
+
+{% if to_decide %}
+<h2>Access requests for your Depots</h2>
+<div class="panel">
+<p class="muted" style="margin-top:0">People who want to use a Depot you own (or, as a tenant admin, any Depot). Approve gives that one person
+<b>Can Use</b> on that one Depot and the Secrets behind it, as audited DataOS grants. Nothing wider.</p>
+<table><thead><tr><th>Who</th><th>Depot</th><th>Why</th><th>Asked</th><th></th></tr></thead><tbody>
+{% for q in to_decide %}
+<tr><td><b>{{ q.who }}</b></td><td><code>{{ q.depot }}</code></td><td class="muted">{{ q.note or '–' }}</td><td>{{ q.created|when }}</td>
+<td style="white-space:nowrap">
+  <form class="inline" method="post" action="{{ root }}/pipelines/requests/{{ q.id }}/approve"><input type="hidden" name="csrf" value="{{ s.csrf }}"><button class="primary">Approve</button></form>
+  <form class="inline" method="post" action="{{ root }}/pipelines/requests/{{ q.id }}/deny"><input type="hidden" name="csrf" value="{{ s.csrf }}"><button>Decline</button></form>
+</td></tr>
+{% endfor %}
+</tbody></table>
+</div>
+{% endif %}
+
+<h2>Pipelines in {{ s.tenant }}</h2>
+<div class="panel">
+{% if rows %}
+<table><thead><tr><th>Name</th><th>Kind</th><th>From</th><th>To</th><th>When</th><th>Last run</th><th>Owner</th></tr></thead><tbody>
+{% for r in rows %}
+<tr><td><a href="{{ root }}/pipelines/{{ r.name }}"><b>{{ r.name }}</b></a>{% if r.description %}<div class="muted" style="font-size:11.5px">{{ r.description }}</div>{% endif %}</td>
+  <td><span class="pill info">{{ r.type }}</span>{% if r.strategy %} <span class="muted" style="font-size:11.5px">{{ r.strategy }}</span>{% endif %}</td>
+  <td><code>{{ r.source }}</code>{% if r.object %}<div class="muted" style="font-size:11.5px">{{ r.object }}</div>{% endif %}</td>
+  <td>{% if r.dest %}<code>{{ r.dest }}</code><div class="muted" style="font-size:11.5px">{{ r.dest_table }}</div>{% else %}<span class="muted">catalog</span>{% endif %}</td>
+  <td class="muted">{{ r.cron or ('continuous' if r.type in ('cdc', 'stream') else 'once') }}</td>
+  <td><span class="pill {{ {'completed':'ok','failed':'bad','running':'warn','initializing':'warn','pending':'warn'}.get(r.phase, '') }}">{{ r.phase }}</span></td>
+  <td>{{ 'you' if r.mine else r.owner }}</td></tr>
+{% endfor %}
+</tbody></table>
+{% else %}<div class="empty">No pipeline yet. <a href="{{ root }}/pipelines/new">Make the first one</a>: it takes four questions.</div>{% endif %}
+</div>
+
+<h2>What each kind is for</h2>
+<div class="panel">
+<table><tbody>
+<tr><td style="width:14%"><span class="pill info">batch</span></td><td>A table, view, file or SaaS object copied once or on a schedule, in full or only what is new or changed. The usual choice, the cheapest, and it needs only read access on the source.</td></tr>
+<tr><td><span class="pill info">cdc</span></td><td>A database's row changes within seconds, read from its change log (PostgreSQL, MySQL, MongoDB, SQL Server). Runs continuously. The database admin must switch change capture on first.</td></tr>
+<tr><td><span class="pill info">stream</span></td><td>Events from Kafka, written as they arrive. Runs continuously.</td></tr>
+<tr><td><span class="pill info">metadata</span></td><td>Copies no rows: tables, columns and lineage (and with <i>deep</i>, profiles, PII tags and usage) appear in the DataOS catalog.</td></tr>
+</tbody></table>
+</div>
+
+<h2>Depots you can move from and to</h2>
+<div class="panel">
+{% if depots %}
+<table><thead><tr><th>Depot</th><th>System</th><th>As a source</th><th>As a destination</th><th>Owner</th><th></th></tr></thead><tbody>
+{% for d in depots %}
+<tr><td><code>{{ d.name }}</code>{% if d.description %}<div class="muted" style="font-size:11.5px">{{ d.description }}</div>{% endif %}</td>
+  <td>{{ d.label }}</td>
+  <td>{% if d.modes %}{% for m in d.modes %}<span class="chip">{{ m }}</span> {% endfor %}{% else %}<span class="muted">not yet</span>{% endif %}</td>
+  <td>{{ 'yes' if d.destination else '–' }}</td>
+  <td>{{ d.owner or '–' }}</td>
+  <td style="white-space:nowrap">{% if d.modes %}<a href="{{ root }}/pipelines/new?source={{ d.name|urlencode }}">Move from here</a>{% endif %}</td></tr>
+{% endfor %}
+</tbody></table>
+{% else %}<div class="empty">No Depots are visible to you in this tenant.</div>{% endif %}
+</div>
+
+{% if mine_asked %}
+<h2>Your access requests</h2>
+<div class="panel"><table><thead><tr><th>Depot</th><th>State</th><th>Asked</th><th>Decided by</th></tr></thead><tbody>
+{% for q in mine_asked %}<tr><td><code>{{ q.depot }}</code></td><td><span class="pill {{ {'approved':'ok','denied':'bad'}.get(q.status, 'warn') }}">{{ q.status }}</span></td><td>{{ q.created|when }}</td><td>{{ q.decided_by or '–' }}</td></tr>{% endfor %}
+</tbody></table></div>
+{% endif %}
+
+<h2>Who may do what</h2>
+<div class="panel muted" style="font-size:13px">
+<p style="margin-top:0">A pipeline runs as the person who deploys it. They need a tenant role that may create pipelines (Tenant Admin, Data Admin or Data
+Developer) and <b>Can Use</b> on the Compute, on each Depot it reads or writes, and on the Secrets behind those Depots.</p>
+<p>This page never grants access by itself. If you may not use a Depot, deploying says which one and offers <b>Request access</b>; the Depot's
+owner (or a tenant admin) approves it here, and only then is a grant made for that one person and that one Depot.</p>
+<p style="margin-bottom:0">The Depot's own database user also needs rights on the source system: read for batch, change-log rights for CDC (for PostgreSQL
+<code>wal_level=logical</code> and <code>REPLICATION</code>). Those are set by the system's admin, not in DataOS.</p>
+</div>
+{% endblock %}

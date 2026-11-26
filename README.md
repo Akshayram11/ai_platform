@@ -160,6 +160,12 @@ The dashboard's **Models** tab deploys small language models on DataOS CPUs in a
 cost; every llama.cpp setting under Customize). The same from a terminal: `dapp model catalog`, `dapp model deploy qwen2.5-0.5b --name small`,
 `dapp model ls`, `dapp model rm NAME --yes`. See [docs/models.md](docs/models.md).
 
+## Moving data (`dapp pipeline`, DataOS Nilus)
+The dashboard's **Pipelines** tab moves data in four questions: where it is, how it changes, where it goes, when. The right Nilus
+pipeline (batch, CDC, stream or catalog) is made and started as you. Access is governed: a Depot you may not use is reported with a
+Request access button for its owner, never granted by dapp. From a terminal: `dapp pipeline depots`,
+`dapp pipeline new NAME --from DEPOT:TABLE --to DEPOT --how once`, `dapp pipeline status NAME`. See [docs/pipelines.md](docs/pipelines.md).
+
 ## MCP tools through the gateway (`dapp tool`)
 
 Any MCP server (Streamable HTTP) can be put behind the gateway. People and apps then use it at

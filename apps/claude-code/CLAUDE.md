@@ -37,6 +37,19 @@ at least 60% of the question's content words, else try the next data product (up
 number was computed, do not call the model: say so and list what can be asked (a 0.5B model invents numbers otherwise). Show each step in the chat
 and say plainly when the MCP fails.
 
+### "Move this data" / "bring table X into the Lakehouse" (DataOS Nilus pipelines)
+1. `dapp pipeline depots` shows what each Depot can be moved from (batch, cdc, stream, metadata) and which can be written to (a Lakehouse).
+2. Pick the answer to "how does the data change?" (`dapp pipeline kinds`): `once` (one copy), `refresh` (full copy on a schedule),
+   `new_rows` (append, needs `--incremental-key`), `changes` (merge, needs `--incremental-key` and `--primary-key`), `live` / `live_history`
+   (CDC, near real time; the source admin must enable change capture), `events` (Kafka), `catalog` (no rows, just the catalog).
+   Prefer batch: it is cheaper and needs only read access. Use CDC only when the user needs changes within seconds.
+3. `dapp pipeline new NAME --from DEPOT:schema.table --to DEPOT[:schema.table] --how ... [--schedule hourly|daily|"30 1 * * *"] --dry-run`,
+   show the user the one-line summary, then run it without `--dry-run`. For a first try add `--limit 1000`.
+4. `dapp --json pipeline status NAME` until the run is `completed` (about a minute for a small table); report rows and the destination table.
+If it says the user can't use a Depot: nothing was created. **Never try to grant access yourself** (no grant manifests, no
+`dataos-ctl` grants): tell the user to press Request access in the dashboard's Pipelines tab; the Depot's owner approves it there.
+`dapp pipeline run NAME` runs a batch pipeline again; `dapp pipeline rm NAME --yes` only when asked (data it wrote stays).
+
 ### A custom app
 Make one folder per app and deploy from source (next section), or start from a ready image with `dapp init NAME --template chatbot`.
 
@@ -116,7 +129,7 @@ dapp deploy -f dapp.yaml               # create or update (a code change rolls t
 dapp --json status NAME                # wait until state is running
 dapp logs NAME -n 100                  # the app's output, including [dapp-run] start-up lines
 dapp access allow NAME USER...         # share a private app
-dapp ls | dapp usage NAME | dapp tool ls | dapp model ls | dapp keys ls
+dapp ls | dapp usage NAME | dapp tool ls | dapp model ls | dapp pipeline ls | dapp keys ls
 dapp rm NAME --yes                     # only when the user asks
 ```
 

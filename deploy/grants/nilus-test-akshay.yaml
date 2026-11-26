@@ -1,0 +1,40 @@
+# Phase-1 Nilus test: lets akshaychametmdcio use one Postgres Depot (source) and one Lakehouse Depot (sink), and the Secrets
+# behind them. Self-granted as Tenant Admin (audited). Remove after the test:
+#   dataos-ctl resource delete -f deploy/grants/nilus-test-akshay.yaml
+name: nilus-test-depots-akshaychametmdcio
+version: v2alpha
+type: grant
+tenant: engineering
+tags: [governance, grant, dapp, nilus-test]
+description: akshaychametmdcio may use Depots pgrds and s3lhdepotrr (Nilus phase-1 test)
+grant:
+  policy_use_case_id: use-specific-depot
+  subjects:
+    - users:id:akshaychametmdcio
+  values:
+    depot-access:
+      - depot: pgrds
+      - depot: s3lhdepotrr
+  collection: engineering
+  requester: akshaychametmdcio
+  notes: Nilus phase-1 test (dapp Pipelines feature)
+  approve: true
+---
+name: nilus-test-secrets-akshaychametmdcio
+version: v2alpha
+type: grant
+tenant: engineering
+tags: [governance, grant, dapp, nilus-test]
+description: akshaychametmdcio may use the Secrets behind pgrds and s3lhdepotrr (Nilus phase-1 test)
+grant:
+  policy_use_case_id: use-specific-secret
+  subjects:
+    - users:id:akshaychametmdcio
+  values:
+    read-specific-secret-governance:
+      - id: engineering:postgressecret
+      - id: engineering:s3_lh_sec_rr
+  collection: system
+  requester: akshaychametmdcio
+  notes: Nilus phase-1 test (dapp Pipelines feature)
+  approve: true

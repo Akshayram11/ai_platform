@@ -21,7 +21,9 @@ from .claude import CLAUDE_CODE_IMAGE
 from .client import DataOS, DataOSError
 from .config import ConfigError, current_context_name, list_contexts, load_context
 from .ctl import WriteError
-from .platform import Platform, PlatformError
+from .pipelines import HOWS, PipelineRequest
+from .pipelines import summary as pipeline_summary
+from .platform import PipelineAccessError, Platform, PlatformError
 from .spec import AppSpec, dump_yaml, load_spec, wire_manifest
 from .usage import GatewayError
 
@@ -41,6 +43,10 @@ app.add_typer(keys_app, name="keys")
 app.add_typer(llm_key_app, name="llm-key")
 app.add_typer(tool_app, name="tool")
 app.add_typer(model_app, name="model")
+pipeline_app = typer.Typer(no_args_is_help=True, context_settings=HELP_OPTIONS,
+                           help="Move data with DataOS Nilus in plain words: Depots, new, ls, status, logs, run, rm "
+                                "(the dashboard's Pipelines tab).")
+app.add_typer(pipeline_app, name="pipeline")
 
 console = Console()
 err = Console(stderr=True)
@@ -738,6 +744,138 @@ def model_rm(
         _out({**gone, "volume_deleted": freed}, lambda r: console.print(
             f"deleted model {r['name']} (app {r['app']})" + ("" if r["volume_deleted"] is None else
                                                             f"; volume {'deleted' if r['volume_deleted'] else 'will be deleted once its pod stops'}")))
+    _run(go)
+
+
+# ---------------------------------------------------------------- pipelines (DataOS Nilus)
+def _access_hint(e: PipelineAccessError) -> PlatformError:
+    ctx = load_context(state.context, state.tenant)
+    return PlatformError(f"{e} Ask in the dashboard: https://{ctx.fqdn}/dapp/pipelines/new "
+                         f"(it sends the request to the Depot's owner). Nothing was created.")
+
+
+@pipeline_app.command("depots")
+def pipeline_depots() -> None:
+    """Depots in the tenant: what each can be moved from (batch, cdc, stream, metadata) and whether it can be written to."""
+    def go():
+        rows = _platform().depots()
+        _out(rows, lambda rs: _table([{**r, "source": ",".join(r["modes"]) or "-", "destination": "yes" if r["destination"] else "-"}
+                                      for r in rs], ["name", "label", "source", "destination", "owner"]))
+    _run(go)
+
+
+@pipeline_app.command("kinds")
+def pipeline_kinds() -> None:
+    """The answers to "how does the data change?" (--how) and the Nilus pipeline each one makes."""
+    rows = [{"how": h.key, "means": h.title, "type": h.type, "strategy": h.strategy or "-",
+             "schedule": "yes" if h.scheduled else ("continuous" if h.type in ("cdc", "stream") else "once"),
+             "needs": ",".join(h.needs) or "-"} for h in HOWS.values()]
+    _out(rows, lambda rs: _table(rs, ["how", "means", "type", "strategy", "schedule", "needs"]))
+
+
+@pipeline_app.command("new")
+def pipeline_new(
+    name: str = typer.Argument(..., metavar="NAME"),
+    source: str = typer.Option(..., "--from", help="DEPOT:OBJECT, e.g. pgrds:public.orders (just DEPOT for --how catalog)"),
+    dest: str = typer.Option("", "--to", help="DEPOT or DEPOT:SCHEMA.TABLE (default table raw.<object>)"),
+    how: str = typer.Option("once", "--how", help="once | refresh | new_rows | changes | live | live_history | events | catalog "
+                                                   "(see `dapp pipeline kinds`)"),
+    schedule: str = typer.Option("daily", "--schedule", help="hourly | every-6h | daily | weekly | a cron line (UTC)"),
+    incremental_key: str = typer.Option("", "--incremental-key", help="column that tells new or changed rows apart"),
+    primary_key: str = typer.Option("", "--primary-key", help="column that identifies a row"),
+    mask: list[str] = typer.Option(None, "--mask", help="COLUMN=hash|redact|partial:N, repeatable"),
+    skip: list[str] = typer.Option(None, "--skip", help="column to leave out, repeatable"),
+    limit: int | None = typer.Option(None, "--limit", help="row limit, for a first try (batch)"),
+    mode: str = typer.Option("shallow", "--mode", help="catalog depth: shallow | deep"),
+    compute: str = typer.Option("engineering-compute", "--compute"),
+    cpu: str = typer.Option("200m", "--cpu"), memory: str = typer.Option("512Mi", "--memory"),
+    cpu_limit: str = typer.Option("1", "--cpu-limit"), memory_limit: str = typer.Option("2Gi", "--memory-limit"),
+    description: str = typer.Option("", "--description", "-d"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="show what would be created; create nothing"),
+) -> None:
+    """Make a pipeline and start it. It runs as you; a Depot you may not use is reported, never granted."""
+    def go():
+        src_depot, _, obj = source.partition(":")
+        dst_depot, _, dst_table = dest.partition(":")
+        masks = {}
+        for m in mask or []:
+            col, _, kind = m.partition("=")
+            masks[col.strip()] = kind.strip() or "hash"
+        req = PipelineRequest(name=name, how=how, source_depot=src_depot, source_object=obj, dest_depot=dst_depot,
+                              dest_table=dst_table, schedule=schedule, incremental_key=incremental_key, primary_key=primary_key,
+                              mask=masks, exclude_columns=list(skip or []), row_limit=limit, metadata_mode=mode, compute=compute,
+                              cpu=cpu, memory=memory, cpu_limit=cpu_limit, memory_limit=memory_limit, description=description)
+        p = _platform()
+        if dry_run:
+            plan = p.plan_pipeline(req)
+            _out({"describe": plan["describe"], "manifest": plan["manifest"]},
+                 lambda r: (console.print(f"[bold]{r['describe']}[/bold]"), console.print(dump_yaml(r["manifest"]))))
+            return
+        try:
+            done = p.deploy_pipeline(req)
+        except PipelineAccessError as e:
+            raise _access_hint(e) from e
+        _out(done, lambda r: console.print(f"started {r['name']}: {r['describe']}\n"
+                                           f"watch it: dapp pipeline status {r['name']}"))
+    _run(go)
+
+
+@pipeline_app.command("ls")
+def pipeline_ls(mine: bool = typer.Option(False, "--mine", help="only yours")) -> None:
+    """Pipelines in the tenant, with their latest run state."""
+    def go():
+        p = _platform()
+        rows = p.pipelines(everyone=not mine)
+        for r in rows:
+            r["phase"] = p.pipeline_phase(r["name"])
+            r["when"] = r["cron"] or ("continuous" if r["type"] in ("cdc", "stream") else "once")
+        _out(rows, lambda rs: _table(rs, ["name", "type", "source", "object", "dest", "dest_table", "when", "phase", "owner"]))
+    _run(go)
+
+
+@pipeline_app.command("status")
+def pipeline_status(name: str = typer.Argument(..., metavar="NAME"), runs: int = typer.Option(5, "--runs")) -> None:
+    """One pipeline: what it does, its state, the last runs (rows, seconds) and 7-day stats."""
+    def go():
+        p = _platform()
+        out = {**pipeline_summary(p.pipeline(name)), "phase": p.pipeline_phase(name),
+               "runs": p.pipeline_runs(name, limit=runs), "stats_7d": p.pipeline_stats(name)}
+
+        def show(r):
+            console.print(f"[bold]{r['name']}[/bold] ({r['type']}) {r['phase']}: {r['description']}")
+            _table(r["runs"], ["started", "ok", "rows", "seconds", "dest", "error"], title="runs")
+        _out(out, show)
+    _run(go)
+
+
+@pipeline_app.command("logs")
+def pipeline_logs(name: str = typer.Argument(..., metavar="NAME"), tail: int = typer.Option(120, "-n")) -> None:
+    """The log of the latest run."""
+    _run(lambda: _out(_platform().pipeline_logs(name, tail=tail)))
+
+
+@pipeline_app.command("run")
+def pipeline_run(name: str = typer.Argument(..., metavar="NAME")) -> None:
+    """Run a batch or catalog pipeline again now (DataOS only runs it again when it is re-created; this does that)."""
+    def go():
+        try:
+            done = _platform().rerun_pipeline(name)
+        except PipelineAccessError as e:
+            raise _access_hint(e) from e
+        _out(done, lambda r: console.print(f"running {r['name']} again; `dapp pipeline status {r['name']}` in a minute"))
+    _run(go)
+
+
+@pipeline_app.command("rm")
+def pipeline_rm(name: str = typer.Argument(..., metavar="NAME"),
+                yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask (agents must pass this)")) -> None:
+    """Delete a pipeline. Data it already wrote stays in the destination."""
+    def go():
+        if not yes:
+            if state.json or not sys.stdin.isatty():
+                raise PlatformError("refusing to delete without --yes")
+            typer.confirm(f"Delete pipeline {name}? Data it wrote stays where it is.", abort=True)
+        _out(_platform().delete_pipeline(name), lambda r: console.print(f"deleted pipeline {r['name']}"))
     _run(go)
 
 

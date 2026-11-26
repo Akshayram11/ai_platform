@@ -28,6 +28,20 @@ from .config import Context, current_context_name
 from .ctl import ApiWriter, Writer, make_writer
 from .models import MAX_MODELS_PER_PERSON, ModelDeploy, model_app_spec, render_volume
 from .pack import Packed, pack
+from .pipelines import (
+    HOWS,
+    PipelineRequest,
+    build_manifest,
+    check,
+    depot_secrets,
+    depot_summary,
+    describe,
+    missing_access,
+    phase_of,
+    resource_id,
+    run_row,
+)
+from .pipelines import summary as pipeline_summary
 from .spec import (
     ALLOWED_ROLES_ENV,
     ALLOWED_USERS_ENV,
@@ -51,6 +65,15 @@ log = logging.getLogger("dapp.platform")
 
 class PlatformError(RuntimeError):
     pass
+
+
+class PipelineAccessError(PlatformError):
+    """DataOS refused a pipeline because the person may not use a Depot, Secret or Compute it names."""
+
+    def __init__(self, missing: list[dict[str, str]], detail: str):
+        names = ", ".join(f"{m['kind']} {m['name']}" for m in missing)
+        super().__init__(f"You can't use {names} yet. Ask its owner for access (the Request access button does it).")
+        self.missing, self.detail = missing, detail
 
 
 def gateway_public_url(ctx: Context) -> str:
@@ -426,6 +449,157 @@ class Platform:
             if time.monotonic() >= deadline:
                 raise PlatformError(f"{kind} {name} did not appear in {int(timeout)} s")
             time.sleep(every)
+
+    # ---------- data pipelines (DataOS Nilus) ----------
+    # Everything runs as the signed-in person. Access they lack is reported (PipelineAccessError), never granted here;
+    # granting happens only in grant_depot_access, called when an owner or a tenant admin approves a request.
+    def depots(self) -> list[dict[str, Any]]:
+        return sorted((depot_summary(d) for d in self.client.list_resources("depot", details=True)),
+                      key=lambda d: (not d["supported"], d["name"]))
+
+    def depot(self, name: str) -> dict[str, Any]:
+        d = self.client.get_resource("depot", name)
+        if d is None:
+            raise PlatformError(f"Depot {name} not found in tenant {self.ctx.tenant}")
+        return d
+
+    def pipelines(self, *, everyone: bool = True) -> list[dict[str, Any]]:
+        owner = None if everyone else self.ctx.user_id
+        rows = [pipeline_summary(r) for r in self.client.list_resources("nilus", owner=owner, details=True)]
+        return sorted(rows, key=lambda r: (r["owner"] != self.ctx.user_id, r["name"] or ""))
+
+    def pipeline(self, name: str) -> dict[str, Any]:
+        r = self.client.get_resource("nilus", name)
+        if r is None:
+            raise PlatformError(f"no pipeline {name}")
+        return r
+
+    def pipeline_phase(self, name: str) -> str:
+        try:
+            return phase_of(self.client.runtime("nilus", name))
+        except DataOSError:
+            return "unknown"
+
+    def plan_pipeline(self, req: PipelineRequest) -> dict[str, Any]:
+        """The manifest and a one-line description, without applying anything."""
+        source = self.depot(req.source_depot)
+        dest = self.depot(req.dest_depot) if req.dest_depot and HOWS.get(req.how) and HOWS[req.how].type != "metadata" else None
+        errs = check(req, source, dest)
+        if errs:
+            raise PlatformError("; ".join(errs))
+        return {"manifest": build_manifest(req, source, dest, owner=self.ctx.user_id),
+                "describe": describe(req, source, dest), "source": depot_summary(source),
+                "dest": depot_summary(dest) if dest else None}
+
+    def deploy_pipeline(self, req: PipelineRequest) -> dict[str, Any]:
+        if self.client.get_resource("nilus", req.name) is not None:
+            raise PlatformError(f"a pipeline named {req.name} already exists: pick another name, or open it and press Run again")
+        plan = self.plan_pipeline(req)
+        self._apply_pipeline(plan["manifest"])
+        return {"name": req.name, "describe": plan["describe"]}
+
+    def _apply_pipeline(self, manifest: dict[str, Any]) -> None:
+        try:
+            self._write(manifest)
+        except (DataOSError, RuntimeError) as e:
+            missing = missing_access(str(e))
+            if missing:
+                raise PipelineAccessError(missing, str(e)) from e
+            raise
+
+    def rerun_pipeline(self, name: str, *, timeout: float = 90, every: float = 3) -> dict[str, Any]:
+        """Run it again now. Re-applying an unchanged pipeline does not run it (tested), so delete and create it again."""
+        res = self.pipeline(name)
+        if (res.get("spec") or {}).get("type") in ("cdc", "stream"):
+            raise PlatformError("CDC and stream pipelines run continuously; there is nothing to run again")
+        manifest = self._editable(res)
+        self.client.delete_resource("nilus", name)
+        deadline = time.monotonic() + timeout
+        while self.client.get_resource("nilus", name) is not None:
+            if time.monotonic() >= deadline:
+                raise PlatformError(f"{name} was not removed within {int(timeout)} s; try again in a minute")
+            time.sleep(every)
+        self._apply_pipeline(manifest)
+        return {"name": name}
+
+    def delete_pipeline(self, name: str) -> dict[str, Any]:
+        self.pipeline(name)
+        return {"name": name, "output": self.writer.delete("nilus", name)}
+
+    def pipeline_logs(self, name: str, *, tail: int = 200) -> str:
+        logs = self.client.logs("nilus", name, tail=tail)
+        return logs if isinstance(logs, str) else flatten_logs(logs)
+
+    def _nilus_manager(self, path: str, **params: Any) -> Any:
+        r = self.client._call("get", f"/nilus-manager/api/v1/tenants/{self.ctx.tenant}{path}", params=params)
+        if r.status_code == 404:
+            return None
+        if not r.is_success:
+            raise PlatformError(f"Nilus Manager: HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+    def pipeline_runs(self, name: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        body = self._nilus_manager(f"/pipelines/{resource_id(name)}/runs", limit=limit) or {}
+        return [run_row(r) for r in body.get("pipelines") or []]
+
+    def pipeline_stats(self, name: str, *, period: str = "7d") -> dict[str, Any] | None:
+        body = self._nilus_manager(f"/pipelines/{resource_id(name)}/stats", period=period) or {}
+        return body.get("stats")
+
+    # ---------- governed access to Depots (for pipelines) ----------
+    def can_grant(self, depot: dict[str, Any]) -> bool:
+        """The Depot's owner, or a tenant admin, may approve someone's request to use it."""
+        me = self.ctx.user_id
+        owners = {depot.get("owner"), *(((depot.get("spec") or {}).get("owners")) or [])}
+        if me in owners:
+            return True
+        try:
+            tags = self.client.whoami().get("tags") or []
+        except DataOSError:
+            return False
+        return f"roles:id:{self.ctx.tenant}-tenant-admin" in tags
+
+    def grant_depot_access(self, depot_name: str, user: str, *, reason: str = "") -> dict[str, Any]:
+        """Let ONE person use ONE Depot and the Secrets behind it (Can Use), as DataOS grants. Only for an approved request:
+        the caller must own the Depot or be a tenant admin. Never use-any-depots / use-any-secret."""
+        depot = self.depot(depot_name)
+        if not self.can_grant(depot):
+            raise PlatformError(f"only the owner of Depot {depot_name} or a tenant admin can grant access to it")
+        who = subject_for(user)
+        safe = "".join(c if c.isalnum() else "-" for c in user.split(":")[-1].lower())[:24]
+        note = f"dapp: {user} may use Depot {depot_name}" + (f" ({reason[:120]})" if reason else "") + \
+               f", approved by {self.ctx.user_id}"
+        tags = ["governance", "grant", DAPP_TAG, "dapp-depot-access", f"dapp-depot-{depot_name}"]
+        base = {"version": "v2alpha", "type": "grant", "tenant": self.ctx.tenant, "tags": tags, "description": note[:240]}
+        tail = pysecrets.token_hex(2)
+        grants = [{**base, "name": f"dapp-depot-{depot_name}-{safe}-{tail}"[:63].rstrip("-"),
+                   "grant": {"policy_use_case_id": "use-specific-depot", "subjects": [who],
+                             "values": {"depot-access": [{"depot": depot_name}]}, "collection": self.ctx.tenant,
+                             "requester": self.ctx.user_id or "unknown", "notes": note, "approve": True}}]
+        secrets_ = depot_secrets(depot)
+        if secrets_:
+            grants.append({**base, "name": f"dapp-depotsec-{depot_name}-{safe}-{tail}"[:63].rstrip("-"),
+                           "grant": {"policy_use_case_id": "use-specific-secret", "subjects": [who],
+                                     "values": {"read-specific-secret-governance": [{"id": s} for s in secrets_]},
+                                     "collection": "system", "requester": self.ctx.user_id or "unknown", "notes": note,
+                                     "approve": True}})
+        self._write(*grants)
+        return {"depot": depot_name, "user": user, "grants": [g["name"] for g in grants], "secrets": secrets_}
+
+    def depot_grants(self, depot_name: str) -> list[dict[str, Any]]:
+        out = []
+        for g in self.client.list_resources("grant", tags=[f"dapp-depot-{depot_name}"], details=True):
+            spec = g.get("spec") or g.get("grant") or {}
+            out.append({"name": g.get("name"), "use_case": spec.get("policy_use_case_id"),
+                        "subjects": spec.get("subjects") or [], "description": g.get("description")})
+        return out
+
+    def revoke_depot_grant(self, depot_name: str, grant: str) -> dict[str, Any]:
+        if not self.can_grant(self.depot(depot_name)):
+            raise PlatformError(f"only the owner of Depot {depot_name} or a tenant admin can take access away")
+        if not any(g["name"] == grant for g in self.depot_grants(depot_name)):
+            raise PlatformError(f"{grant} is not a dapp grant on Depot {depot_name}")
+        return {"grant": grant, "output": self.writer.delete("grant", grant)}
 
     def scale(self, name: str, replicas: int) -> dict[str, Any]:
         if replicas < 1:

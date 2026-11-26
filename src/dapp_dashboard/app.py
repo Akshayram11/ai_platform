@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -56,7 +57,16 @@ from dapp.models import (
     traits_of,
     with_hf_facts,
 )
-from dapp.platform import ID_RE, Platform, PlatformError, gateway_internal_url, gateway_public_url
+from dapp.pipelines import HOWS, SCHEDULE_WORDS, PipelineRequest
+from dapp.pipelines import summary as pipeline_summary
+from dapp.platform import (
+    ID_RE,
+    PipelineAccessError,
+    Platform,
+    PlatformError,
+    gateway_internal_url,
+    gateway_public_url,
+)
 from dapp.usage import GatewayError, GatewayUsage, Prometheus, observability_url, service_of
 from dapp_login import SCOPES, Login, Settings
 from dapp_objects import Client as ObjectsClient
@@ -1119,6 +1129,226 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         threading.Thread(target=p.delete_model_volume, args=(gone["volume"],), daemon=True,
                          name=f"volume-{gone['volume']}").start()   # DataOS frees it once the pod has stopped
         return back(request, "/models", msg=f"Deleted {name}. Its Volume (the downloaded model) is removed once the pod stops.")
+
+    # ------------------------------------------------------------------ pipelines (DataOS Nilus)
+    # Move data in plain words: where from, where to, how it changes. Everything is applied as the signed-in person; a Depot
+    # they may not use is reported with a Request access button, and only its owner (or a tenant admin) can approve that.
+    pipelines_compute = os.environ.get("DAPP_PIPELINES_COMPUTE") or models_compute
+    pipelines_dest = os.environ.get("DAPP_PIPELINES_DEST", "")       # the Lakehouse Depot the form suggests first
+
+    def depot_choices(p: Platform) -> list[dict[str, Any]]:
+        listed = _safe(p.depots)
+        return listed if isinstance(listed, list) else []
+
+    def pipeline_form(values: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {"name": "", "how": "once", "source_depot": "", "source_object": "", "dest_depot": pipelines_dest,
+                "dest_table": "", "schedule": "daily", "cron": "", "incremental_key": "", "primary_key": "", "mask": "",
+                "exclude_columns": "", "row_limit": "", "metadata_mode": "shallow", "compute": pipelines_compute,
+                "cpu": "200m", "memory": "512Mi", "cpu_limit": "1", "memory_limit": "2Gi", "description": "",
+                **(values or {})}
+
+    def parse_pipeline(form) -> PipelineRequest:
+        f = {k: str(v).strip() for k, v in form.items()}
+        mask: dict[str, str] = {}
+        for part in re.split(r"[,\n]", f.get("mask", "")):
+            if part.strip():
+                col, _, how = part.partition("=")
+                mask[col.strip()] = how.strip() or "hash"
+        limit = f.get("row_limit", "")
+        if limit and not limit.isdigit():
+            raise ValueError("row limit must be a whole number")
+        schedule = f.get("cron") if f.get("schedule") == "custom" else f.get("schedule", "daily")
+        try:
+            return PipelineRequest(
+                name=f.get("name", ""), how=f.get("how", "once"), source_depot=f.get("source_depot", ""),
+                source_object=f.get("source_object", ""), dest_depot=f.get("dest_depot", ""), dest_table=f.get("dest_table", ""),
+                schedule=schedule or "daily", incremental_key=f.get("incremental_key", ""), primary_key=f.get("primary_key", ""),
+                mask=mask, exclude_columns=[c.strip() for c in f.get("exclude_columns", "").split(",") if c.strip()],
+                row_limit=int(limit) if limit else None, metadata_mode=f.get("metadata_mode") or "shallow",
+                compute=f.get("compute") or pipelines_compute, cpu=f.get("cpu") or "200m", memory=f.get("memory") or "512Mi",
+                cpu_limit=f.get("cpu_limit") or "1", memory_limit=f.get("memory_limit") or "2Gi",
+                description=f.get("description", ""))
+        except ValidationError as e:
+            raise ValueError("; ".join(f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors())) from e
+
+    def depot_requests(p: Platform, s: Session) -> list[dict[str, Any]]:
+        """Open requests to use a Depot that this person may decide (they own the Depot, or are a tenant admin)."""
+        db = _safe(requests_db)
+        if db is None or isinstance(db, dict):
+            return []
+        rows = _safe(lambda: db.sql("select id, app, who, note, created from requests where app like 'depot:%' "
+                                    "and status = 'pending' order by created, rowid"))
+        if not isinstance(rows, list):
+            return []
+        out, can = [], {}
+        for r in rows:
+            depot = r["app"].removeprefix("depot:")
+            if depot not in can:
+                d = _safe(lambda depot=depot: p.depot(depot))
+                can[depot] = isinstance(d, dict) and "name" in d and bool(_safe(lambda d=d: p.can_grant(d)) is True)
+            if can[depot]:
+                out.append({**r, "depot": depot})
+        return out
+
+    def my_depot_requests(s: Session) -> list[dict[str, Any]]:
+        db = _safe(requests_db)
+        if db is None or isinstance(db, dict):
+            return []
+        rows = _safe(lambda: db.sql("select app, status, created, decided_by from requests where app like 'depot:%' "
+                                    "and who = ? order by created desc limit 10", [s.user_id]))
+        return [{**r, "depot": r["app"].removeprefix("depot:")} for r in rows] if isinstance(rows, list) else []
+
+    @api.get("/pipelines", response_class=HTMLResponse)
+    def pipelines_page(request: Request):
+        s = need(request)
+        p = platform_for(s)
+        listed = _safe(p.pipelines)
+        err = listed.get("error") if isinstance(listed, dict) else None
+        rows = listed if isinstance(listed, list) else []
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            phases = list(pool.map(lambda r: _safe(lambda: p.pipeline_phase(r["name"])), rows))
+        for r, ph in zip(rows, phases):
+            r["phase"] = ph if isinstance(ph, str) else "unknown"
+            r["mine"] = r.get("owner") == s.user_id
+        return render(request, "pipelines.html", s, rows=rows, pipelines_error=err, depots=depot_choices(p),
+                      to_decide=depot_requests(p, s), mine_asked=my_depot_requests(s), hows=list(HOWS.values()))
+
+    def new_page(request: Request, s: Session, p: Platform, form: dict[str, Any], *, plan=None, error_text=None,
+                 missing=None, status: int = 200) -> HTMLResponse:
+        depots = depot_choices(p)
+        resp = render(request, "pipeline_new.html", s, form=form, depots=depots, hows=list(HOWS.values()),
+                      schedules=SCHEDULE_WORDS, plan=plan, error_text=error_text, missing=missing or [],
+                      depot_json=json.dumps({d["name"]: {"modes": d["modes"], "object_word": d["object_word"],
+                                                         "label": d["label"], "destination": d["destination"]}
+                                             for d in depots}),
+                      plan_yaml=yaml.safe_dump(plan["manifest"], sort_keys=False) if plan else "")
+        resp.status_code = status
+        return resp
+
+    @api.get("/pipelines/new", response_class=HTMLResponse)
+    def pipeline_new_page(request: Request, source: str = "", how: str = ""):
+        s = need(request)
+        p = platform_for(s)
+        values = {"source_depot": source} if source else {}
+        if how in HOWS:
+            values["how"] = how
+        return new_page(request, s, p, pipeline_form(values))
+
+    @api.post("/pipelines/new", response_class=HTMLResponse)
+    async def pipeline_new(request: Request):
+        s = need(request)
+        raw = await request.form()
+        check_csrf(s, str(raw.get("csrf", "")))
+        form = pipeline_form({k: v for k, v in raw.items() if k not in ("csrf", "action")})
+        p = platform_for(s)
+        try:
+            req = parse_pipeline(form)
+            if raw.get("action") != "deploy":
+                return new_page(request, s, p, form, plan=p.plan_pipeline(req))
+            done = p.deploy_pipeline(req)
+        except PipelineAccessError as e:
+            return new_page(request, s, p, form, error_text=str(e), missing=e.missing, status=403)
+        except (ValueError, PlatformError, DataOSError) as e:
+            return new_page(request, s, p, form, error_text=str(e), status=400)
+        return back(request, f"/pipelines/{done['name']}",
+                    msg=f"Started: {done['describe']}. The first run shows here in about a minute.")
+
+    @api.post("/pipelines/request-access")
+    def pipeline_request_access(request: Request, depot: str = Form(...), note: str = Form(""), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        if not ID_RE.match(depot):
+            raise HTTPException(404, "unknown Depot")
+        note = " ".join(note.split())[:300]
+        try:
+            db = requests_db()
+            if db is None:
+                return back(request, "/pipelines", err="Access requests aren't switched on for this dashboard.")
+            key = f"depot:{depot}"
+            if db.sql("select id from requests where app = ? and who = ? and status = 'pending'", [key, s.user_id]):
+                db.sql("update requests set note = ? where app = ? and who = ? and status = 'pending'", [note, key, s.user_id])
+            else:
+                if db.sql("select count(*) as n from requests where who = ? and status = 'pending'", [s.user_id])[0]["n"] >= 20:
+                    return back(request, "/pipelines", err="You have too many open requests. Wait for answers first.")
+                db.sql("insert into requests (id, app, who, note) values (?, ?, ?, ?)", [uuid.uuid4().hex[:12], key, s.user_id, note])
+        except (ObjectsError, OSError) as e:
+            return back(request, "/pipelines", err=f"Could not send the request: {e}")
+        return back(request, "/pipelines", msg=f"Asked for access to Depot {depot}. Its owner (or a tenant admin) decides "
+                                                "on the Pipelines page; you can deploy once they approve.")
+
+    def open_depot_request(s: Session, rid: str):
+        p = platform_for(s)
+        db = requests_db()
+        rows = db.sql("select app, who, note, status from requests where id = ? and app like 'depot:%'", [rid]) if db else []
+        if not rows or rows[0]["status"] != "pending":
+            raise ValueError("that request is no longer open")
+        depot = rows[0]["app"].removeprefix("depot:")
+        if not p.can_grant(p.depot(depot)):
+            raise HTTPException(403, f"only the owner of Depot {depot} or a tenant admin can decide this")
+        return p, db, depot, rows[0]["who"], rows[0]["note"]
+
+    @api.post("/pipelines/requests/{rid}/approve")
+    def pipeline_request_approve(request: Request, rid: str, csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        try:
+            p, db, depot, who, note = open_depot_request(s, rid)
+            p.grant_depot_access(depot, who, reason=note)
+            decide(db, rid, "approved", s.user_id)
+        except (DataOSError, PlatformError, ValueError, ObjectsError, OSError) as e:
+            return back(request, "/pipelines", err=str(e))
+        return back(request, "/pipelines", msg=f"{who} may now use Depot {depot} and its Secrets (DataOS grants, audited).")
+
+    @api.post("/pipelines/requests/{rid}/deny")
+    def pipeline_request_deny(request: Request, rid: str, csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        try:
+            _, db, depot, who, _ = open_depot_request(s, rid)
+            decide(db, rid, "denied", s.user_id)
+        except (DataOSError, PlatformError, ValueError, ObjectsError, OSError) as e:
+            return back(request, "/pipelines", err=str(e))
+        return back(request, "/pipelines", msg=f"Declined {who}'s request for Depot {depot}.")
+
+    @api.get("/pipelines/{name}", response_class=HTMLResponse)
+    def pipeline_page(request: Request, name: str):
+        s = need(request)
+        p = platform_for(s)
+        res = _safe(lambda: p.pipeline(name))
+        if not isinstance(res, dict) or "name" not in res:
+            raise HTTPException(404, f"no pipeline {name}")
+        row = pipeline_summary(res)
+        runs = _safe(lambda: p.pipeline_runs(name))
+        stats = _safe(lambda: p.pipeline_stats(name))
+        logs = _safe(lambda: p.pipeline_logs(name, tail=120))
+        manifest = {k: res[k] for k in ("name", "version", "type", "description", "spec") if k in res}
+        return render(request, "pipeline_detail.html", s, r=row, phase=p.pipeline_phase(name),
+                      runs=runs if isinstance(runs, list) else [], runs_error=runs.get("error") if isinstance(runs, dict) else None,
+                      stats=stats if isinstance(stats, dict) and "error" not in stats else None,
+                      logs=logs if isinstance(logs, str) else "", mine=row["owner"] == s.user_id,
+                      yaml_text=yaml.safe_dump(manifest, sort_keys=False))
+
+    @api.post("/pipelines/{name}/run")
+    def pipeline_run(request: Request, name: str, csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        try:
+            platform_for(s).rerun_pipeline(name)
+        except (DataOSError, PlatformError) as e:
+            return back(request, f"/pipelines/{name}", err=str(e))
+        return back(request, f"/pipelines/{name}", msg="Running again. The new run shows here in about a minute.")
+
+    @api.post("/pipelines/{name}/delete")
+    def pipeline_delete(request: Request, name: str, confirm: str = Form(""), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        if confirm != name:
+            return back(request, f"/pipelines/{name}", err=f"Type {name} to confirm")
+        try:
+            platform_for(s).delete_pipeline(name)
+        except (DataOSError, PlatformError) as e:
+            return back(request, f"/pipelines/{name}", err=str(e))
+        return back(request, "/pipelines", msg=f"Deleted {name}. Data it already wrote stays in the destination.")
 
     # ------------------------------------------------------------------ Claude Code (one per person)
     # Everyone deploys their own: its pod runs as them (DataOS gives it their identity), so what it deploys is theirs, nobody else can

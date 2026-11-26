@@ -13,6 +13,7 @@ every call it makes runs as that person, so DataOS permissions decide what they 
 | App → Secrets, Access, Logs, Settings | Manage secrets, the allow list and requests, read logs, scale or delete |
 | **Storage** | immortal-obj as you (see below) |
 | **Models** | Deploy, use and delete small language models: [models.md](models.md) |
+| **Pipelines** | Move data with DataOS Nilus in four questions; runs, logs, Run again, Delete; Depot access requests for owners to approve: [pipelines.md](pipelines.md) |
 | **Claude Code** | Deploy your own Claude Code in a click, stop and start it, store your Claude token: [claude-code.md](claude-code.md) |
 | Tools | MCP tools behind the gateway: who can use them, usage |
 | Keys | DataOS API keys and gateway keys |
