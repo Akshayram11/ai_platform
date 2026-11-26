@@ -4,7 +4,7 @@
 | App | Image | Notes |
 |---|---|---|
 | `dapp` (dashboard) | `dataos-apps:0.1.26` | `objects: true`; Models tab |
-| `dapp-llm-gateway` | `dataos-apps:0.1.28` | Volume `dapp-gateway-data`; local model `small`; personal keys; model registry |
+| `dapp-llm-gateway` | `dataos-apps:0.1.29` | Volume `dapp-gateway-data`; local model `small`; personal keys; model registry |
 | `model-<name>` | `llm-small:b12679-m1` | one per model deployed from the Models tab (own Volume `model-<name>-data`) |
 | `immortal-obj` | `dapp-runtime:python-3.12-r7` | Volume `immortal-obj` |
 | `chatbot` | `dapp-chatbot:0.1.14` | `llm`, `objects`, `metrics`; models `gpt-6-luna` and `small`; history |

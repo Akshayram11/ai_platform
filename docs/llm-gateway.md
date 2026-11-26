@@ -2,6 +2,9 @@
 
 One service (`dapp-llm-gateway`, `/dapp-gateway`) in front of every model call and every MCP tool call.
 
+## The home page
+Open the gateway in a browser (`https://<host>/dapp-gateway/`) for a guide: what the gateway is for (provider keys stay in one place, every call is metered, models inside DataOS, data tools), how to use it from an app (`llm: true`), from a laptop (`dapp llm-key personal`), for MCP tools and for usage, which models are callable right now, and the endpoint list. The page is static text and shows no key; it is `src/dapp_gateway/landing.py`.
+
 ## Keys
 - **App key.** `llm: true` in `dapp.yaml` makes `dapp deploy` ask the gateway for a key for that app and store it in
   the secret `dapp-<app>-llm` (`DAPP_LLM_KEY`). The app also gets `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`. The gateway keeps

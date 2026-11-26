@@ -269,3 +269,18 @@ def test_helper_waits_out_a_gateway_move():
     with pytest.raises(dapp_objects.ObjectsError, match="HTTP 401"):
         c.call("get", {"object": "o", "key": "k"})
     assert len(calls) == 1 and sleeps == []
+
+
+def test_guide_page_is_public_but_the_tools_are_not(tmp_path, monkeypatch):
+    monkeypatch.setenv("IMMORTAL_DATA", str(tmp_path))
+    monkeypatch.setenv("TOOL_TOKEN", "tool-secret")
+    sys.modules.pop("server", None)
+    server = importlib.import_module("server")
+    with TestClient(server.app, base_url="http://immortal-obj:8080") as tc:
+        for path in ("/", "/immortal-obj/", "/immortal-obj"):
+            r = tc.get(path, headers={"accept": "text/html"})
+            assert r.status_code == 200 and "text/html" in r.headers["content-type"], path
+            assert "What is it, and why" in r.text and "objects: true" in r.text and "Storage" in r.text
+            assert "tool-secret" not in r.text
+        assert tc.get("/").status_code == 401                       # no html accept: still the gateway-only answer
+        assert tc.post("/mcp", json={}, headers={"accept": "text/html"}).status_code == 401

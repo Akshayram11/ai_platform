@@ -20,7 +20,6 @@ Admin API (callers authenticate with their DataOS token/API key, verified by Hei
 from __future__ import annotations
 
 import asyncio
-import html
 import json
 import logging
 import os
@@ -39,6 +38,7 @@ from dapp.auth import Heimdall, Identity, IdentityUnavailable, token_from_header
 from dapp.client import DataOS, DataOSError
 from dapp.config import Context
 
+from . import landing
 from .meter import Meter
 from .store import GROUPABLE, AppKey, LocalModel, Pricing, Store
 from .tools import Vault, mount_tools
@@ -199,17 +199,9 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
             "dashboard": f"{base.rsplit('/', 1)[0]}/dapp/",
         }
         if "text/html" in request.headers.get("accept", ""):
-            rows = "".join(f"<tr><td><code>{k}</code></td><td>{v}</td></tr>" for k, v in info["endpoints"].items())
-            prov = ", ".join(f"{k}: {'configured' if v else 'not configured'}" for k, v in providers.items())
-            rows += "".join(f"<tr><td><code>model {html.escape(m)}</code></td><td>{html.escape(v)}</td></tr>"
-                            for m, v in info["local_models"].items())
-            return HTMLResponse(
-                "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-                "<title>dapp LLM gateway</title><style>body{font:15px system-ui;max-width:760px;margin:40px auto;padding:0 16px;"
-                "color:#1c1c1a;background:#f7f7f5}@media(prefers-color-scheme:dark){body{color:#ecebe6;background:#141413}}"
-                "td{padding:6px 10px;border-bottom:1px solid #8884;vertical-align:top}code{font-size:13px}</style>"
-                f"<h1>dapp LLM gateway</h1><p>Running. Providers — {prov}.</p><table>{rows}</table>"
-                f"<p><a href='{info['dashboard']}'>Open the dashboard</a></p>")
+            return HTMLResponse(landing.page(base=base, host=os.environ.get("DATAOS_FQDN", ""), dashboard=info["dashboard"],
+                                             providers=providers, local_models=info["local_models"],
+                                             endpoints=info["endpoints"]))
         return info
 
     @api.get("/healthz")

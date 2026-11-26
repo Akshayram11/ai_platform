@@ -4,6 +4,9 @@ Durable storage that belongs to a person or an app, our equivalent of Cloudflare
 Apps lose their files on every restart; an object does not. Governed by DataOS identity: every call is made by a
 known caller and recorded by the gateway.
 
+## The home page
+Open immortal-obj in a browser (`https://<host>/immortal-obj/`) for a guide: why it exists, the two kinds of object, how to use it from an app (`objects: true`) and from an agent (the tool list), limits, and where to manage objects (the dashboard's Storage page). Only a browser GET shows it; every other call still needs the gateway's token. Static text, no data: `apps/immortal-obj/app/landing.py`.
+
 ## Model
 - An **object** has one **owner** (`user:<id>` or `app:<name>`) and a name. A bare name is always your own;
   `<owner>/<name>` refers to one shared with you (for example `app:chatbot/u/alice-2bd806/chat`).

@@ -84,6 +84,10 @@ def test_root_page(tmp_path, monkeypatch):
     h = c.get("/", headers={"accept": "text/html"})
     assert "text/html" in h.headers["content-type"] and "dapp LLM gateway" in h.text
     assert c.get("/nope").status_code == 404
+    # the page explains what the gateway is for and how to use it, and holds no key
+    for needle in ("What is it, and why", "How to use it", "llm: true", "dapp llm-key personal", "DAPP_LLM_KEY", "dataproduct-mcp"):
+        assert needle in h.text
+    assert "sk-" not in h.text
 
 
 def test_openai_cached_tokens_are_not_charged_twice():
@@ -242,7 +246,8 @@ def test_local_model_goes_to_its_own_server(tmp_path, monkeypatch):
     by = {r["provider"]: r for r in rows}
     assert by["local"]["requests"] == 2 and by["local"]["input_tokens"] == 7 and by["openai"]["requests"] == 1
     assert c.get("/healthz").json()["local_model_apps"] == {"small": "llm-small"}
-    assert "model small" in c.get("/", headers={"accept": "text/html"}).text    # the landing page names it
+    page = c.get("/", headers={"accept": "text/html"}).text                  # the landing page names it
+    assert "<code>small</code>" in page and "served by DataOS app llm-small" in page
     only = c.get("/admin/usage?model=small&group_by=app", headers={"apikey": "alice-key"}).json()
     assert only["rows"] == [{**only["rows"][0], "app": "chatbot", "requests": 2}] and only["total"]["requests"] == 2
 

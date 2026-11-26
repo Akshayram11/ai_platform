@@ -16,6 +16,7 @@ import os
 
 import uvicorn
 from immortal_obj import Caller, ObjError, Store
+from landing import PAGE
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
@@ -160,6 +161,13 @@ def build():
                             "headers": [(b"content-type", b"application/json")]})
                 return await send({"type": "http.response.body", "body": b'{"ok": true}'})
             headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
+            if (scope["method"] == "GET" and scope["path"].rstrip("/").rsplit("/", 1)[-1] in ("", "immortal-obj")
+                    and "text/html" in headers.get("accept", "")):
+                body = PAGE.encode()          # the guide page: static text, no data
+                await send({"type": "http.response.start", "status": 200,
+                            "headers": [(b"content-type", b"text/html; charset=utf-8"),
+                                        (b"content-length", str(len(body)).encode())]})
+                return await send({"type": "http.response.body", "body": body})
             given = headers.get("authorization", "").removeprefix("Bearer ").strip()
             if not TOKEN or not hmac.compare_digest(given.encode(), TOKEN.encode()):
                 body = b'{"error": "immortal-obj is reached through the dapp gateway"}'
