@@ -25,6 +25,29 @@ Private (DataOS sign-in), and `dapp_proxy` additionally lets only the **owner** 
 DataOS identity (DataOS gives the pod `DATAOS_RUN_AS_USER` / `DATAOS_RUN_AS_APIKEY`), so everything it deploys is yours and
 DataOS permissions apply. It has a shell: treat the page like a terminal on your account.
 
+## Add the dapp MCP to online Claude Code
+
+The `dapp` MCP lets Claude list your DataOS apps and inspect pod status, recent logs, and usage. Claude launches the
+server as a local process over stdio. It inherits the terminal's DataOS identity, so the same DataOS permissions apply.
+
+In the online Claude terminal, enter `/exit` to return to the shell. The current `dapp mcp` server uses the Python MCP
+SDK v1. Set up a virtual environment that can see the installed `dapp` CLI and uses a compatible SDK:
+
+```bash
+python3 -m venv --system-site-packages "$HOME/.venvs/dapp-mcp"
+uv pip install --python "$HOME/.venvs/dapp-mcp/bin/python" 'mcp>=1.2,<2'
+claude mcp add --scope user dapp -- "$HOME/.venvs/dapp-mcp/bin/python" "$(command -v dapp)" mcp
+claude mcp list
+claude --continue
+```
+
+If a user-scoped `dapp` entry already points to an older command, run `claude mcp remove --scope user dapp`, then repeat the
+`claude mcp add` command. In Claude, use `/mcp` to check the connection. To try a read-only diagnosis, ask:
+
+> Use the dapp MCP to list my apps. Check the status and recent logs for `chatbot`, and quote the lines that support any issue you find.
+
+The setup survives pod restarts when your Claude machine's home directory is on a persistent DataOS Volume.
+
 ## What survives
 | Thing | Survives a browser refresh | Survives a pod restart or move |
 |---|---|---|
