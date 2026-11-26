@@ -1,0 +1,21 @@
+# Log Assistant: a DataOS-style Logs page with an AI button; the chat (OpenAI gpt-6-luna through the dapp gateway) reads the
+# logs itself through the gateway tool `dapp-monitor` (apps and services: status, recent logs, stored logs over any time range).
+#   dapp deploy -f examples/log-assistant/dapp.yaml
+#   dapp tool allow dapp-monitor app:log-assistant          # once: lets this app use the tool (the gateway records every call)
+# Private (DataOS sign-in): only the owner until people are added (dapp access allow log-assistant USER). Everyone who can open
+# it sees what dapp-monitor may show (MONITOR_ALLOW in apps/dapp-monitor/dapp.yaml).
+name: log-assistant
+title: Log Assistant
+description: Logs of your apps and services, with an AI that answers questions about them
+runtime: python-3.12
+code: ./app
+run: uvicorn app:app --host 0.0.0.0 --port $PORT --proxy-headers
+compute: engineering-compute
+path: /log-assistant
+llm: true                       # DAPP_LLM_KEY + OPENAI_BASE_URL: the gateway meters the model per person
+tools: [dapp-monitor]           # the app may call this MCP tool through the gateway
+metrics: true
+resources: {cpu: 100m, memory: 256Mi, cpuLimit: "1", memoryLimit: 512Mi}
+env:
+  ROOT_PATH: /log-assistant
+  LOG_MODEL: gpt-6-luna

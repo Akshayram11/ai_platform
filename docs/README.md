@@ -6,7 +6,7 @@ quick start; these pages go deeper.
 | Page | Read it for |
 |---|---|
 | [architecture.md](architecture.md) | The pieces and how a request moves between them |
-| [dapp-monitor.md](dapp-monitor.md) | The dapp-monitor MCP tool: app and service status, recent logs, logs over any time range, error counts; `dapp logs --search` |
+| [dapp-monitor.md](dapp-monitor.md) | The dapp-monitor MCP tool (app and service status, recent logs, logs over any time range, error counts), `dapp logs --search`, and the Log Assistant demo (Logs page + AI chat) |
 | [pipelines.md](pipelines.md) | The Pipelines tab and `dapp pipeline`: move data with Nilus in plain words, governed Depot access |
 | [nilus-custom-sources.md](nilus-custom-sources.md) | Custom API sources with Nilus (parked): how they work, why Git, where the code could live, the plan |
 | [nilus-notes.md](nilus-notes.md) | What we tested live about Nilus: permissions, purposes, runs API, re-run behaviour |

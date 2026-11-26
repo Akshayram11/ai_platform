@@ -24,7 +24,7 @@ dapp-gateway = "dapp_gateway.app:main"
 dapp-dashboard = "dapp_dashboard.app:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "respx>=0.21", "ruff>=0.6", "aiohttp>=3.9,<4"]   # aiohttp: the claude-code workbench tests
+dev = ["pytest>=8", "respx>=0.21", "ruff>=0.6", "aiohttp>=3.9,<4", "openai>=1.50"]   # aiohttp, openai: app tests (claude-code workbench, log-assistant)
 
 [build-system]
 requires = ["hatchling"]

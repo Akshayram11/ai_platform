@@ -59,6 +59,22 @@ with `Authorization: Bearer $DAPP_LLM_KEY`.
 `src/dapp/logsearch.py` holds the search (time parsing, checks, the call, masking); `apps/dapp-monitor/app/logsearch.py` is an
 identical copy (a test keeps them equal) because app code ships alone. Tests: `tests/test_monitor.py`.
 
+## The Log Assistant (demo app on top of it)
+`examples/log-assistant` (live at `https://<host>/log-assistant/`): a page laid out like DataOS's resource Logs page (resource and
+kind picker, Build/Runtime, pods, Live / Historical, keyword, 1m … 7d or a custom UTC range, the log table with WARN/ERROR
+rows coloured), and an **AI** button. Pressing it opens a chat docked under the logs, on the same page.
+
+- The page's data comes from `dapp-monitor` through the gateway (`/api/resources`, `/api/status`, `/api/logs`).
+- The chat (`/api/chat`) sends the question to `gpt-6-luna` through the gateway (metered per person, `x-dapp-user`) with only the
+  monitor's functions as tools and `reasoning_effort: none` (chat completions refuses function tools with reasoning on). The
+  system message says what the page shows (resource, kind, Live/Historical, keyword, window, pod) and the time now, so
+  "is anything wrong here?" means this resource and this window. Up to 8 tool rounds per question.
+- Each answer shows what was looked at as chips (`log_summary → 75 lines: 0 error …`, `search_logs → 75 matching lines,
+  showing 5`) and quotes the log lines it used. It answers in the user's language (Hinglish in, Hinglish out).
+- Deploy: `dapp deploy -f examples/log-assistant/dapp.yaml` (`llm: true`, `tools: [dapp-monitor]`; the deploy also allows
+  `app:log-assistant` on the tool). Private: only the owner until people are added, and everyone who can open it sees what
+  dapp-monitor may show (`MONITOR_ALLOW`). Tests: `tests/test_log_assistant.py`.
+
 ## Not yet
 - An audit trail (who deployed or deleted what, when): no single DataOS API found yet; cloud events search needs index names.
 - Metrics (CPU, memory over time) as a tool.

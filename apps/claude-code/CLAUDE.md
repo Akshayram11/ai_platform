@@ -86,6 +86,8 @@ root, no `apt`, and no Docker here (deploy apps with `dapp`). Check space with `
 - An app can do the same through the gateway tool `dapp-monitor` (`tools: [dapp-monitor]` with `llm: true`): `list_resources`,
   `status`, `recent_logs`, `search_logs`, `log_summary`, each with `kind` (app or service). It searches the app's own container
   (not DataOS's log shipper) and masks credentials. Ask the owner to allow your app on it (`dapp tool allow dapp-monitor app:NAME`).
+- "An AI that answers questions about our logs": start from `examples/log-assistant` (Logs page + AI chat, gpt-6-luna with the
+  dapp-monitor tools); copy it, change `name`/`path`/`ROOT_PATH`, and deploy.
 
 ## Apps from source (`runtime:`): no Docker
 
