@@ -50,6 +50,11 @@ One connection per user, made once in the dashboard, used by Claude Code and Age
 - Done when: a new Claude Code machine starts with the user's code, and a deleted agent comes back from GitHub.
 
 ### 3. Tools for agents: one place to connect MCP servers
+Phase 1 done (2026-11-27, dashboard 0.1.41): Add tool on the Tools page (Data Product MCP preset, custom URL with a
+key or token), edit, Check connection, + Add tool from the Agents page with the tool ticked on return, and a clear
+publish message when a tool's owner must allow the agent's app. Next: OAuth MCP servers with per-user tokens
+(phase 2), "as the user" / "as the owner" and tool status (phase 3).
+
 Tools are connected once on the **Tools** page; agents only choose them.
 
 - Agents tab: the Tools section lists connected servers as checkboxes, plus **+ Add tool**, which opens the Tools page
