@@ -96,7 +96,7 @@ def test_deploy_uses_the_defaults_then_waits_until_ready(fake, monkeypatch):
     monkeypatch.setenv("DAPP_DEFAULT_COMPUTE", "my-compute")
     fake.ready_after = 3                                      # the model needs a few polls to load
     r = runner.invoke(cli_app, ["model", "deploy", "qwen2.5-0.5b", "--name", "my-q", "--timeout", "60"])
-    assert r.exit_code == 0 and fake.calls == [("deploy", "my-q", "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M", "my-compute", "poldp01", 2, 8192, "2")]
+    assert r.exit_code == 0 and fake.calls == [("deploy", "my-q", "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M", "my-compute", "poliksdp01", 2, 8192, "2")]
     assert "deployed model my-q" in r.stdout and "ready" in r.stdout and "estimated cost $" in r.stdout and "dapp llm-key personal" in r.stdout
     assert fake.ready_after <= 0                              # it did poll until the gateway said ready
     r, done = run("--json", "model", "deploy", "--hf", "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q8_0", "--name", "mine", "--compute", "c2", "--disk", "4")

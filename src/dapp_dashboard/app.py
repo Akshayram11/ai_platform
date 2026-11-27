@@ -1106,7 +1106,7 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
     # ------------------------------------------------------------------ models
     # Small language models deployed on DataOS CPUs (llama.cpp), private, reached through the gateway by name.
     models_compute = os.environ.get("DAPP_MODELS_COMPUTE", "engineering-compute")
-    models_dataplane = os.environ.get("DAPP_MODELS_DATAPLANE", "poldp01")
+    models_dataplane = os.environ.get("DAPP_MODELS_DATAPLANE", "poliksdp01")
 
     def deploy_form(entry, hf: str = "", quants: dict[str, float] | None = None) -> dict[str, Any]:
         """The values the Deploy form starts with: the sizes that fit this model, and llama.cpp's own defaults."""

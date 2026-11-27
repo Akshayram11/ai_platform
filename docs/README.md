@@ -21,6 +21,6 @@ quick start; these pages go deeper.
 | [runbook.md](runbook.md) | Versions that are live, build and deploy commands, gotchas we hit |
 | [MANAGER_PROMPT.md](MANAGER_PROMPT.md) | One prompt to have an agent deploy a chatbot |
 
-Instance: `https://poliks.instance.dataos.cloud`, tenant `engineering`, compute `engineering-compute`, dataplane `poldp01`.
+Instance: `https://poliks.instance.dataos.cloud`, tenant `engineering`, compute `engineering-compute`, dataplane `poliksdp01` (`poldp01` was removed on 2026-11-27).
 
 Rule for every page: no secret values anywhere (tokens, keys, `.env` contents). Docs name the secret, never its value.

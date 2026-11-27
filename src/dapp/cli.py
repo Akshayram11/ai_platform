@@ -737,7 +737,7 @@ def model_deploy(
             return
         p = _platform()
         target = compute or d.compute or os.environ.get("DAPP_DEFAULT_COMPUTE") or "engineering-compute"
-        done = p.deploy_model(d, compute=target, dataplane=os.environ.get("DAPP_MODELS_DATAPLANE", "poldp01"))
+        done = p.deploy_model(d, compute=target, dataplane=os.environ.get("DAPP_MODELS_DATAPLANE", "poliksdp01"))
         ready = _wait_ready(p, d.name, timeout) if wait and not state.json else None
         result = {**done, "estimated_cost": plan["estimated_cost"], "ready": ready}
 

@@ -19,6 +19,7 @@ env:
   DATAOS_FQDN: poliks.instance.dataos.cloud
   # DATAOS_TENANT_ID comes from DataOS (the tenant the app runs in)
   DAPP_GATEWAY_INTERNAL_URL: http://dapp-gateway:8080
+  DAPP_MODELS_DATAPLANE: poliksdp01   # where a model's disk (Volume) goes; poldp01 was removed on 2026-11-27
   # Thanos query frontend in the observability (sentinel) namespace; see
   # dataos-component-install/installs/values/observability-mcp.component.values.yaml for the exact URL.
   # DAPP_PROMETHEUS_URL: http://thanos-query-frontend.<sentinel-namespace>:9090   # not known for poliks yet

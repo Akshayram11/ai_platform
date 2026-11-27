@@ -101,11 +101,11 @@ dapp model rm my-qwen --yes                              # gateway first, then t
 Flags: `--name --quant --compute --cpu --cpu-limit --memory --memory-limit --disk`; every other Customize setting is `--set key=value` (`ctx`, `parallel`, `threads`,
 `batch`, `ubatch`, `flash_attn`, `cache_type_k`, `cache_type_v`, `max_tokens`, `reasoning`, `jinja`, `context_shift`, `cont_batching`, `timeout_s`, `temperature`,
 `top_k`, `top_p`, `min_p`, `repeat_penalty`). The defaults are the model's own, and `threads` follows `--cpu-limit` unless set. The checks and messages are the dashboard's.
-Compute comes from `--compute`, else `DAPP_DEFAULT_COMPUTE`, else `engineering-compute`; the Volume's dataplane from `DAPP_MODELS_DATAPLANE` (default `poldp01`).
+Compute comes from `--compute`, else `DAPP_DEFAULT_COMPUTE`, else `engineering-compute`; the Volume's dataplane from `DAPP_MODELS_DATAPLANE` (default `poliksdp01`).
 A key to call it: `dapp llm-key personal --save ~/.dapp/llm.env`, then `$DAPP_KEY` and `$DAPP_BASE_URL`.
 
 ## Operating it
-- Dashboard env: `DAPP_MODELS_COMPUTE` (default `engineering-compute`), `DAPP_MODELS_DATAPLANE` (default `poldp01`), `DAPP_MODEL_IMAGE` (the llama.cpp image),
+- Dashboard env: `DAPP_MODELS_COMPUTE` (default `engineering-compute`), `DAPP_MODELS_DATAPLANE` (default `poliksdp01`), `DAPP_MODEL_IMAGE` (the llama.cpp image),
   `DAPP_MAX_MODELS`. The dashboard acts as the signed-in person, so they need the usual create-resource and Can Use permissions.
 - Gateway: table `local_models` (the model server's key is encrypted with `DAPP_GATEWAY_SECRET_KEY`), endpoints `GET/POST /admin/models`,
   `DELETE /admin/models/<tenant>/<name>`. A name in `DAPP_LOCAL_MODELS` cannot be registered again.

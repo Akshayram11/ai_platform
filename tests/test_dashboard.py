@@ -652,7 +652,7 @@ def test_models_tab_lists_deploys_customizes_and_deletes(monkeypatch):
     assert 'href="https://x.dataos.cloud/chatbot/?model=my-qwen"' in done.text and "Try it in the DataOS chatbot" in done.text
     call = next(x for x in fake.calls if x[0] == "deploy_model")
     _, name, source, compute, dataplane, env, cpu_limit, mem_limit = call
-    assert (name, source, compute, dataplane) == ("my-qwen", "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q8_0", "engineering-compute", "poldp01")
+    assert (name, source, compute, dataplane) == ("my-qwen", "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q8_0", "engineering-compute", "poliksdp01")
     assert (cpu_limit, mem_limit) == ("3", "2Gi")
     assert env["LLAMA_ARG_CTX_SIZE"] == "8192" and env["LLAMA_ARG_N_PARALLEL"] == "2" and env["LLAMA_ARG_FLASH_ATTN"] == "on"
     assert env["LLAMA_ARG_CACHE_TYPE_K"] == "q8_0" and env["LLAMA_ARG_N_PREDICT"] == "300" and env["LLAMA_ARG_REASONING"] == "off"
