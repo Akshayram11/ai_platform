@@ -96,6 +96,12 @@ def test_real_dashboard_routes_save_preview_publish_and_rollback(monkeypatch, tm
 
     url = "/dapp/api/agents"
     assert c.get(url).json()["models"] == ["gpt-6-luna", "small"]
+    # The picker sees every model, grouped, and which hosted ones are still starting; /models alone is what it polls.
+    assert c.get(url + "/models").json()["model_options"] == [
+        {"name": "gpt-6-luna", "kind": "gateway", "ready": True},
+        {"name": "small", "kind": "dataos", "ready": True, "description": ""},
+        {"name": "starting", "kind": "dataos", "ready": False, "description": ""}]
+    assert 'id="host-model"' in page.text and "/dapp/models" in page.text
     assert c.post(url, json=DRAFT).status_code == 403
     record = c.post(url, json=DRAFT, headers=headers).json()
     agent_url = url + "/" + record["id"]

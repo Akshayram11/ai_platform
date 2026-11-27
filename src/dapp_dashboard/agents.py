@@ -156,14 +156,20 @@ def mount_agents(api, *, need, check_csrf, render, gateway_for, platform_for, ap
 
     def catalog(session):
         gateway = gateway_for(session)
-        models = {m.strip() for m in os.environ.get("DAPP_AGENT_MODELS", "gpt-6-luna").split(",") if m.strip()}
+        hosted = sorted({m.strip() for m in os.environ.get("DAPP_AGENT_MODELS", "gpt-6-luna").split(",") if m.strip()})
         local = gateway.list_models(session.tenant)
-        models.update(m["name"] for m in local if m.get("ready"))
+        # Every model the picker shows: provider models through the gateway, and models hosted in DataOS (dapp model
+        # deploy / the Models tab) with whether they answer yet. Only ready ones can be chosen (`models`).
+        options = [{"name": m, "kind": "gateway", "ready": True} for m in hosted]
+        options += [{"name": m["name"], "kind": "dataos", "ready": bool(m.get("ready")),
+                     "description": m.get("description") or m.get("repo") or ""}
+                    for m in sorted(local, key=lambda m: m["name"]) if m["name"] not in hosted]
         tools = [
             {"name": t["name"], "description": t.get("description", "")}
             for t in gateway.list_tools(session.tenant)
         ]
-        return {"models": sorted(models), "tools": sorted(tools, key=lambda t: t["name"])}
+        return {"models": sorted(o["name"] for o in options if o["ready"]), "model_options": options,
+                "tools": sorted(tools, key=lambda t: t["name"])}
 
     def validate(session, config):
         options = catalog(session)
@@ -192,6 +198,15 @@ def mount_agents(api, *, need, check_csrf, render, gateway_for, platform_for, ap
             return {**catalog(session), "agents": registry().list(session)}
         except (ObjectsError, GatewayError, httpx.HTTPError, ValueError) as exc:
             raise HTTPException(502, "Could not load the gateway catalog or agent storage.") from exc
+
+    @api.get("/api/agents/models")       # before /api/agents/{agent_id}, which would take "models" as an id
+    def models(request: Request):
+        """The picker refreshes this while a model hosted in DataOS is still starting."""
+        session = need(request)
+        try:
+            return catalog(session)
+        except (GatewayError, httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(502, "Could not load the gateway catalog.") from exc
 
     @api.get("/api/agents/{agent_id}")
     def detail(agent_id: str, request: Request):

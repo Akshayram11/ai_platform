@@ -12,6 +12,9 @@
 .agent-field { display: grid; gap: 6px; }
 .agent-field > span { font-weight: 600; }
 .agent-field textarea { min-height: 140px; resize: vertical; font-family: inherit; }
+.agent-model-help { margin: 0; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; font-size: 13px; }
+.agent-model-help #model-hint:empty { display: none; }
+.agent-model-help a { white-space: nowrap; }
 .agent-tools { margin: 0; border: 0; padding: 0; }
 .agent-tools-list { display: grid; gap: 7px; margin-top: 8px; max-height: 220px; overflow: auto; }
 .agent-tool { display: flex; gap: 9px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; }

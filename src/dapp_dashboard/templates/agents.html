@@ -15,7 +15,11 @@
   <form class="agent-card agent-config" id="agent-config">
     <div class="agent-toolbar"><h2>Configuration</h2><button type="button" id="log-template">Use Log Auditor template</button></div>
     <label class="agent-field"><span>Agent name</span><input name="title" required maxlength="60" placeholder="Log Auditor"></label>
-    <label class="agent-field"><span>Model</span><select name="model" required><option value="">Loading models…</option></select></label>
+    <div class="agent-field">
+      <label class="agent-field"><span>Model</span><select name="model" required aria-describedby="model-hint"><option value="">Loading models…</option></select></label>
+      <p class="agent-model-help"><span id="model-hint" class="muted"></span>
+        <a href="{{ root }}/models" target="_blank" rel="noopener" id="host-model">+ Host a model in DataOS</a></p>
+    </div>
     <label class="agent-field"><span>System instructions</span><textarea name="instructions" required maxlength="12000" placeholder="Tell the agent what to do and what evidence to use."></textarea></label>
     <fieldset class="agent-tools">
       <legend>MCP servers</legend>
@@ -95,10 +99,7 @@
     for (const item of options.agents) picker.add(new Option(item.title, item.id));
     picker.value = agent?.id || "";
 
-    const models = options.models.slice();
-    if (draft.model && !models.includes(draft.model)) models.push(draft.model);
-    form.elements.model.replaceChildren(...models.map(model => new Option(model, model)));
-    form.elements.model.value = draft.model || (models.includes("gpt-6-luna") ? "gpt-6-luna" : models[0] || "");
+    fillModels(draft.model);
 
     const tools = options.tools.slice();
     for (const name of draft.tools || []) {
@@ -122,6 +123,67 @@
       label.append(check, caption);
       container.append(label);
     }
+    modelHint();                                            // the tool warning depends on the ticks just drawn
+  }
+
+  // The model picker: provider models through the gateway, and models hosted in DataOS. A hosted model that is still
+  // starting is listed but can't be chosen; the list refreshes until it is ready.
+  function modelOptions() {
+    return options.model_options || options.models.map(name => ({name, kind: "gateway", ready: true}));
+  }
+
+  function fillModels(wanted) {
+    const select = form.elements.model;
+    const keep = wanted || select.value;
+    const all = modelOptions();
+    const groups = [["gateway", "Through the LLM gateway"], ["dataos", "Hosted in DataOS"]];
+    select.replaceChildren();
+    for (const [kind, label] of groups) {
+      const items = all.filter(m => m.kind === kind);
+      if (!items.length) continue;
+      const group = document.createElement("optgroup");
+      group.label = label;
+      for (const m of items) {
+        const option = new Option(m.ready ? m.name : m.name + " · starting…", m.name);
+        option.disabled = !m.ready;
+        option.dataset.kind = kind;
+        group.append(option);
+      }
+      select.append(group);
+    }
+    if (keep && !all.some(m => m.name === keep)) {          // a saved draft's model that is gone: keep it visible
+      const option = new Option(keep + " · not available now", keep);
+      option.dataset.kind = "missing";
+      select.append(option);
+    }
+    const ready = all.filter(m => m.ready).map(m => m.name);
+    select.value = keep && (ready.includes(keep) || !all.some(m => m.name === keep)) ? keep
+      : (ready.includes("gpt-6-luna") ? "gpt-6-luna" : ready[0] || "");
+    modelHint();
+  }
+
+  function modelHint() {
+    const chosen = form.elements.model.selectedOptions[0];
+    const kind = chosen?.dataset.kind;
+    const withTools = form.querySelector('input[name="tool"]:checked');
+    const starting = modelOptions().filter(m => !m.ready).length;
+    let text = "";
+    if (kind === "dataos" && withTools) text = "Small models hosted in DataOS often can't call tools. For an agent with tools, a gateway model such as gpt-6-luna is safer.";
+    else if (kind === "dataos") text = "Runs inside DataOS: prompts stay in DataOS and there is no OpenAI bill.";
+    else if (kind === "gateway") text = "Through the LLM gateway (OpenAI). Tokens count toward the app's monthly budget.";
+    else if (kind === "missing") text = "This model is not available now. Pick another, or host it again.";
+    if (starting) text += (text ? " " : "") + starting + (starting === 1 ? " model is" : " models are") + " starting in DataOS; it can be picked when ready.";
+    find("model-hint").textContent = text;
+  }
+
+  async function refreshModels() {
+    if (document.hidden) return;
+    try {
+      const fresh = await api("/models");
+      options.models = fresh.models;
+      options.model_options = fresh.model_options;
+      fillModels(form.elements.model.value);
+    } catch {}
   }
 
   function showVersions() {
@@ -231,6 +293,11 @@
     run(async () => { await save(); tell("Draft saved."); });
   });
   publishButton.addEventListener("click", () => run(() => publish(null)));
+  form.elements.model.addEventListener("change", modelHint);
+  find("tool-options").addEventListener("change", modelHint);
+  // Back from the Models tab (or every 20 s while a hosted model is starting): pick up new and newly ready models.
+  window.addEventListener("focus", refreshModels);
+  setInterval(() => { if (modelOptions().some(m => !m.ready)) refreshModels(); }, 20000);
   load();
 })();
 </script>
