@@ -829,6 +829,11 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
             return platform_for(need(request)).status(name)
         except PlatformError as e:
             raise HTTPException(404, str(e))
+            if found.get("needs_key"):
+                hint = (" For Data Product MCP use your DataOS API key (Keys page)." if name == "dataproduct-mcp" else "")
+                return back(request, "/tools?" + urlencode({"added": name}),
+                            err=f"{name}: saved, but the server asks for a key or token and does not offer sign-in. "
+                                f"Open Edit on it and paste one.{hint}")
 
     @api.get("/api/apps/{name}/usage")
     def api_usage(request: Request, name: str, since_hours: int = 720):

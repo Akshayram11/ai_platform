@@ -14,7 +14,7 @@ from dapp.auth import Identity
 from dapp_gateway import oauth
 from dapp_gateway.app import create_app
 from dapp_gateway.store import Store
-from dapp_gateway.tools import Vault
+from dapp_gateway.tools import Vault, check_tool_url
 
 ALICE, BOB, CAROL = {"apikey": "alice-key"}, {"apikey": "bob-key"}, {"apikey": "carol-key"}
 MCP = "https://mcp.example.com/mcp"
@@ -240,3 +240,25 @@ def test_the_owner_sees_how_the_tool_last_went(env):
     connect(c, server, BOB, "bob")
     rpc(c, BOB)
     assert row(ALICE)["last_call"]["error"] is False
+
+
+def test_a_server_that_wants_a_key_and_offers_no_sign_in_is_not_an_error():
+    """Like Data Product MCP behind DataOS: 401 "no auth tokens", and every /.well-known path answers 200 with a web
+    page. That is "needs a key", not a broken sign-in."""
+    def dataos_like(req):
+        if str(req.url).startswith(MCP):
+            return httpx.Response(401, json={"error": {"status": 401, "message": "no auth tokens"}},
+                                  headers={"www-authenticate": 'error="no auth tokens"'})
+        return httpx.Response(200, headers={"content-type": "text/html; charset=utf-8"}, text="<!DOCTYPE html><html></html>")
+
+    with httpx.Client(transport=httpx.MockTransport(dataos_like)) as http, pytest.raises(oauth.NoSignInOffered):
+        oauth.discover(MCP, http, check_tool_url)
+
+
+def test_html_pages_are_not_metadata():
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, headers={"content-type": "text/html"}, text="<html>"))
+    with httpx.Client(transport=transport) as http:
+        assert oauth._metadata(http, "https://x.example.com/.well-known/oauth-protected-resource") is None
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json={"issuer": "https://x.example.com"}))
+    with httpx.Client(transport=transport) as http:
+        assert oauth._metadata(http, "https://x.example.com/m") == {"issuer": "https://x.example.com"}

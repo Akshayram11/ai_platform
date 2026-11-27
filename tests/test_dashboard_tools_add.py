@@ -188,3 +188,14 @@ def test_the_owner_sees_status_agents_and_the_shared_account_switch(c):
     assert "own+account+again" in r.headers["location"] or "own%20account" in r.headers["location"]
     assert c.post("/tools/notion/acts-as", data={"mode": "owner", "csrf": "nope"}, follow_redirects=False).status_code == 403
     assert "none of your agents use it" in html and "working" in html or "no calls yet" in html
+
+
+def test_a_key_server_without_sign_in_says_to_paste_a_key(c, monkeypatch):
+    monkeypatch.setattr(OAuthGateway, "oauth_setup", lambda self, t, n, r, **kw: {
+        "needs_sign_in": False, "needs_key": True, "reason": "offers no sign-in"})
+    token = csrf(c.get("/tools").text)
+    r = c.post("/tools/add", data={"name": "dataproduct-mcp", "url": "https://x.dataos.cloud/dataproduct-mcp/api/v1",
+                                   "csrf": token}, follow_redirects=False)
+    err = query(r)["err"]
+    assert err.startswith("dataproduct-mcp: saved, but the server asks for a key or token") and "Keys page" in err
+    assert "did not answer" not in err

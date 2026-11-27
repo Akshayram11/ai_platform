@@ -34,6 +34,10 @@ class NoSignIn(OAuthError):
     """The server answered without asking anyone to sign in: it needs no OAuth."""
 
 
+class NoSignInOffered(OAuthError):
+    """The server wants credentials (401) but publishes no OAuth metadata: it takes a key or token, not a sign-in."""
+
+
 def pkce() -> tuple[str, str]:
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
@@ -50,6 +54,19 @@ def _json(r: httpx.Response, what: str) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise OAuthError(f"{what}: unexpected reply")
     return body
+
+
+def _metadata(http: httpx.Client, url: str) -> dict[str, Any] | None:
+    """The JSON document at url, or None. A page that is not JSON (a web console answers 200 HTML for any path) or
+    an error is "nothing here", not a failure."""
+    r = http.get(url)
+    if r.status_code >= 400 or "json" not in r.headers.get("content-type", "").lower():
+        return None
+    try:
+        body = r.json()
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
 
 
 def _well_known(url: str, name: str) -> list[str]:
@@ -71,24 +88,28 @@ def discover(url: str, http: httpx.Client, check) -> dict[str, Any]:
     candidates = [m[1]] if m else _well_known(url, "oauth-protected-resource")
     prm = None
     for c in candidates:
-        resp = http.get(check(c))
-        if resp.status_code < 400:
-            prm = _json(resp, "protected resource metadata")
+        prm = _metadata(http, check(c))
+        if prm is not None:
             break
     if prm is None:   # older servers: the authorization server is the MCP server's own origin
         p = urlsplit(url)
         prm = {"authorization_servers": [urlunsplit((p.scheme, p.netloc, "", "", ""))], "resource": url}
+        implicit = True
+    else:
+        implicit = False
     servers = prm.get("authorization_servers") or []
     if not servers:
         raise OAuthError("the server names no authorization server")
     issuer = check(servers[0])
     asm = None
     for c in [*_well_known(issuer, "oauth-authorization-server"), *_well_known(issuer, "openid-configuration")]:
-        resp = http.get(check(c))
-        if resp.status_code < 400:
-            asm = _json(resp, "authorization server metadata")
+        asm = _metadata(http, check(c))
+        if asm is not None and asm.get("authorization_endpoint"):
             break
+        asm = None
     if asm is None:
+        if implicit:   # no metadata anywhere: this server takes a key or token, it does not offer a sign-in
+            raise NoSignInOffered("the server asks for credentials but offers no sign-in (no OAuth metadata)")
         raise OAuthError(f"no authorization server metadata at {issuer}")
     for key in ("authorization_endpoint", "token_endpoint"):
         if not asm.get(key):

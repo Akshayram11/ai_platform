@@ -345,6 +345,9 @@ def mount_tools(api: FastAPI, *, store: Store, heimdall: Heimdall | None, caller
             meta = oauth.discover(t.url, oauth_http, check_tool_url)
         except oauth.NoSignIn:
             return {"tool": f"{tenant}/{name}", "auth_mode": t.auth_mode or "key", "needs_sign_in": False}
+        except oauth.NoSignInOffered as e:      # it wants a key or token: say so, the tool stays a key tool
+            return {"tool": f"{tenant}/{name}", "auth_mode": t.auth_mode or "key", "needs_sign_in": False,
+                    "needs_key": True, "reason": str(e)}
         except (oauth.OAuthError, httpx.HTTPError) as e:
             raise HTTPException(422, f"could not set up sign-in for {name}: {e}")
         try:
