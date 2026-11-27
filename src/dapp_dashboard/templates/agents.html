@@ -28,7 +28,8 @@
       <div id="tool-options" class="agent-tools-list">Loading tools…</div>
     </fieldset>
     <div class="agent-toolbar">
-      <button type="submit">Save draft</button>
+      <span class="row"><button type="submit">Save draft</button>
+        <button type="button" class="danger" id="delete-agent" hidden>Delete agent</button></span>
       <button class="primary" type="button" id="publish-agent">Publish</button>
     </div>
   </form>
@@ -232,6 +233,7 @@
 
   function show(record) {
     agent = record;
+    find("delete-agent").hidden = !record;
     const draft = record?.draft || {};
     form.elements.title.value = draft.title || "";
     form.elements.instructions.value = draft.instructions || "";
@@ -312,6 +314,20 @@
     run(async () => { await save(); tell("Draft saved."); });
   });
   publishButton.addEventListener("click", () => run(() => publish(null)));
+  find("delete-agent").addEventListener("click", () => {
+    if (!agent) return;
+    const title = agent.draft?.title || "this agent";
+    const app = agent.applied ? " Its app " + agent.app + " will be removed too." : "";
+    if (!confirm("Delete " + title + "? Its draft and all versions go." + app)) return;
+    run(async () => {
+      const gone = agent;
+      const result = await api("/" + gone.id, "DELETE");
+      options.agents = options.agents.filter(item => item.id !== gone.id);
+      resetChat();
+      show(null);
+      tell("Deleted " + title + (result.app_removed ? " and its app " + result.app_removed : "") + ".");
+    });
+  });
   form.elements.model.addEventListener("change", modelHint);
   find("tool-options").addEventListener("change", modelHint);
   // Back from the Models tab (or every 20 s while a hosted model is starting): pick up new and newly ready models.

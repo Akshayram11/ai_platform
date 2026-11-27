@@ -101,6 +101,13 @@ class Registry:
             raise HTTPException(404, "Agent version not found.")
         return AgentConfig.model_validate_json(rows[0]["config"])
 
+    def delete(self, session, agent_id):
+        agent = self.get(session, agent_id)              # 404 unless it is yours
+        self.db.sql("delete from agent_versions where id = ?", [agent_id])
+        self.db.sql("delete from agents where id = ? and tenant = ? and owner = ?",
+                    [agent_id, session.tenant, session.user_id])
+        return agent
+
     def mark_applied(self, session, agent_id, version):
         self.db.sql("update agents set applied = ? where id = ? and tenant = ? and owner = ?",
                     [version, agent_id, session.tenant, session.user_id])
@@ -246,6 +253,30 @@ def mount_agents(api, *, need, check_csrf, render, gateway_for, platform_for, ap
             raise HTTPException(502, str(exc)) from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise HTTPException(502, "The gateway catalog is unavailable.") from exc
+
+    @api.delete("/api/agents/{agent_id}")
+    def delete(agent_id: str, request: Request):
+        """Forget the agent (draft and versions) and remove its app, if it still runs and is this agent's."""
+        s = need(request)
+        check_csrf(s, request.headers.get("x-csrf-token", ""))
+        try:
+            db = registry()
+            agent = db.get(s, agent_id)
+            removed = None
+            p = platform_for(s)
+            live = p.client.get_resource("app", agent["app"])
+            if live:
+                svc = (live.get("spec") or {}).get("service") or {}
+                if live.get("owner") == s.user_id and yaml_decode((svc.get("envs") or {}).get("DAPP_AGENT_ID")) == agent_id:
+                    p.delete(agent["app"], purge=True)       # its code secret, sign-in client and gateway key too
+                    removed = agent["app"]
+            db.delete(s, agent_id)
+            return {"deleted": agent_id, "app_removed": removed}
+        except ObjectsError as exc:
+            raise HTTPException(502, "Agent storage is unavailable.") from exc
+        except (DataOSError, PlatformError, WriteError, GatewayError) as exc:
+            raise HTTPException(502, "Could not remove the agent's app; the agent was kept. Try again, or remove "
+                                     f"{agent['app']} on the Apps page first.") from exc
 
     @api.post("/api/agents/{agent_id}/publish")
     def publish(agent_id: str, payload: Publish, request: Request):

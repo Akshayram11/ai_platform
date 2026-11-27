@@ -84,7 +84,9 @@ def test_real_dashboard_routes_save_preview_publish_and_rollback(monkeypatch, tm
     app = create_app(heimdall=identity, login=FakeLogin(), gateway_factory=lambda s: gateway,
                      app_objects_factory=lambda: registry,
                      platform_factory=lambda s, t=None: SimpleNamespace(
-                         client=SimpleNamespace(get_resource=resource), deploy=deploy))
+                         client=SimpleNamespace(get_resource=resource), deploy=deploy,
+                         delete=lambda name, purge=False: removed.append((name, purge)) or live.pop(name, None)))
+    removed = []
     c = TestClient(app, base_url="https://testserver", root_path="/dapp")
     assert c.get("/dapp/agents", follow_redirects=False).status_code == 303
     c.get("/dapp/login", follow_redirects=False)
@@ -165,6 +167,17 @@ def test_real_dashboard_routes_save_preview_publish_and_rollback(monkeypatch, tm
     assert rolled_back["agent"]["applied"] == 1
     assert rolled_back["agent"]["draft"]["instructions"] == "New draft"
     assert deployed[-1] == deployed[0]
+
+    # Delete: the agent leaves the list, and its app goes with it (only when it is this agent's own app).
+    app_name = first["agent"]["app"]
+    assert c.delete(agent_url).status_code == 403                                    # no CSRF token
+    gone = c.delete(agent_url, headers=headers).json()
+    assert gone == {"deleted": record["id"], "app_removed": app_name} and removed == [(app_name, True)]
+    assert c.get(agent_url).status_code == 404
+    assert all(a["id"] != record["id"] for a in c.get(url).json()["agents"])
+    other = c.post(url, json=DRAFT, headers=headers).json()                           # never published: no app
+    assert c.delete(f"{url}/{other['id']}", headers=headers).json()["app_removed"] is None
+    assert len(removed) == 1
 
 
 def test_engine_calls_only_selected_tools_and_reports_its_steps():
