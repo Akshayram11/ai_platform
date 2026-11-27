@@ -1168,6 +1168,28 @@ class Platform:
         except DataOSError:
             return None
 
+    # ---------- monthly token budgets (gateway; only the app's owner may change them) ----------
+    def budgets(self, app: str) -> dict[str, Any]:
+        return self._gateway().budgets(self.ctx.tenant, app)
+
+    def set_budgets(self, app: str, *, app_tokens: int | None = None, per_user: int | None = None,
+                    clear: list[str] | None = None) -> dict[str, Any]:
+        return self._gateway().set_budgets(self.ctx.tenant, app, app_tokens=app_tokens, default_user_tokens=per_user,
+                                           clear=clear)
+
+    def set_user_budget(self, app: str, user: str, tokens: int) -> dict[str, Any]:
+        uid = self._one_user(user)
+        return self._gateway().set_user_budget(self.ctx.tenant, app, uid, tokens)
+
+    def delete_user_budget(self, app: str, user: str) -> dict[str, Any]:
+        return self._gateway().delete_user_budget(self.ctx.tenant, app, self._one_user(user))
+
+    def _one_user(self, typed: str) -> str:
+        """A DataOS user id from what someone typed (an id in any case, or an email). A name that matches nobody raises
+        with the closest ids, so a typo never gets a budget of its own."""
+        ids, _ = self.resolve_users([typed])
+        return ids[0] if ids else typed
+
     def llm_usage(self, app: str | None = None, since_hours: int = 24 * 30,
                   group_by: str = "app,model") -> dict[str, Any]:
         """Tokens and cost. group_by can include end_user: the signed-in people who used the app."""

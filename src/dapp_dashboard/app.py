@@ -68,7 +68,15 @@ from dapp.platform import (
     gateway_public_url,
 )
 from dapp.sources import PRESETS, SourceRequest, from_url, redact
-from dapp.usage import GatewayError, GatewayUsage, Prometheus, observability_url, service_of
+from dapp.usage import (
+    GatewayError,
+    GatewayUsage,
+    Prometheus,
+    observability_url,
+    parse_tokens,
+    service_of,
+    show_tokens,
+)
 from dapp_login import SCOPES, Login, Settings
 from dapp_objects import Client as ObjectsClient
 from dapp_objects import ObjectsError
@@ -146,6 +154,7 @@ def fmt_money(v: float | None) -> str:
 TEMPLATES.env.filters["money"] = fmt_money
 TEMPLATES.env.filters["num"] = fmt_num
 TEMPLATES.env.filters["when"] = fmt_when
+TEMPLATES.env.filters["tokens"] = show_tokens
 
 
 def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, platform_factory=None,
@@ -405,6 +414,8 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
             if isinstance(by_user, dict) and isinstance(by_user.get("rows"), list):  # biggest users first
                 by_user["rows"].sort(key=lambda r: r["input_tokens"] + r["output_tokens"], reverse=True)
             ctx["by_user"] = by_user
+            # this month's token budgets: the owner sees every user and can change them; anyone else sees their own row
+            ctx["budget"] = _safe(lambda: gateway_for(s).budgets(st["tenant"], name)) if ctx.get("uses_gateway") else None
         elif tab == "overview":
             ctx["llm"] = _safe(lambda: gateway_for(s).summary(app=name, group_by="model"))
             # an app that serves a model for the gateway (llm-small): which apps called it and how much
@@ -593,6 +604,44 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         check_csrf(s, csrf)
         dest = back_to if back_to.startswith("/") and not back_to.startswith("//") else "/keys"
         return _act(request, dest, lambda: platform_for(s).revoke_llm_key(app, prefix), f"Revoked key {prefix}…")
+
+    # ------------------------------------------------------------------ token budgets (the app's owner only)
+    def _budget_act(request: Request, app: str, fn) -> RedirectResponse:
+        dest = f"/apps/{app}?tab=llm"
+        try:
+            out = fn(platform_for(need(request)).status(app)["tenant"])
+        except (DataOSError, PlatformError, GatewayError, ValueError) as e:
+            return back(request, dest, err=str(e))
+        note = (out or {}).get("note") if isinstance(out, dict) else None
+        return back(request, dest, msg="Budgets saved." + (f" {note}" if note else ""))
+
+    @api.post("/budgets/{app}")
+    def budget_set(request: Request, app: str, app_tokens: str = Form(""), per_user: str = Form(""), csrf: str = Form("")):
+        """The form shows the current values: a cleared field removes that budget."""
+        s = need(request)
+        check_csrf(s, csrf)
+
+        def save(tenant: str):
+            clear = [k for k, v in (("app", app_tokens), ("default_user", per_user)) if not v.strip()]
+            return gateway_for(s).set_budgets(
+                tenant, app, app_tokens=parse_tokens(app_tokens) if app_tokens.strip() else None,
+                default_user_tokens=parse_tokens(per_user) if per_user.strip() else None, clear=clear)
+        return _budget_act(request, app, save)
+
+    @api.post("/budgets/{app}/users")
+    def budget_user_set(request: Request, app: str, user: str = Form(...), tokens: str = Form(...), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        def save(tenant: str):
+            ids, _ = platform_for(s).resolve_users([user])          # a typo raises with the closest ids
+            return gateway_for(s).set_user_budget(tenant, app, ids[0] if ids else user, parse_tokens(tokens))
+        return _budget_act(request, app, save)
+
+    @api.post("/budgets/{app}/users/{user}/delete")
+    def budget_user_delete(request: Request, app: str, user: str, csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        return _budget_act(request, app, lambda tenant: gateway_for(s).delete_user_budget(tenant, app, user))
 
     # ------------------------------------------------------------------ MCP tools
     @api.get("/tools", response_class=HTMLResponse)

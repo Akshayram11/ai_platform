@@ -29,6 +29,34 @@ Every call records tenant, app, owner, model, end user, tokens (input, output, c
 - An app tells the gateway who is using it with the `x-dapp-user` header (the dashboard and chatbot do this).
 - `small` has no price, so its cost shows `–`, not `$0`.
 
+## Monthly token budgets
+An app's owner can cap how many tokens the app, and each person using it, may spend in a calendar month (UTC).
+Tokens = input + output + cache read + cache write. Counting starts from the month's existing usage, so a budget set
+mid-month already knows what was spent.
+
+| Level | Meaning |
+|---|---|
+| App budget | The ceiling for the whole app (every user, and calls with no user). Checked first. |
+| Default per user | Each signed-in person (`x-dapp-user`) may use this much, unless they have their own. |
+| One user's own | Overrides the default for that person. Can't be above the app budget. |
+
+A person with no budget of their own and no default may use up to the app budget. Personal keys (`user:<id>`) have no
+budget. A call that starts under the budget finishes even if it crosses it; the next one gets
+**429** `{"error": {"type": "budget_exceeded", "message": "... resets on 2026-12-01 (UTC)"}}`. Every answer of an app
+with a budget carries `x-dapp-budget-left` (the app) and, when the user has one, `x-dapp-user-budget-left`.
+
+Only the app's **owner** changes budgets: not a Tenant Admin, not a gateway admin. Anyone else sees the app's totals and
+their own row.
+- Dashboard: app page → **LLM usage** → **Token budget · this month**: app budget, used, left, each user with a pill
+  (orange from 80%, red at 100%), and the owner's form (clear a field to remove that budget).
+- CLI: `dapp budget show APP`, `dapp budget set APP --app 5M --per-user 200k`, `dapp budget set APP --user rajat 500k`,
+  `dapp budget rm APP --app | --per-user | --user NAME`. Amounts: `5000000`, `5M`, `200k`, `50lakh`/`50L`, `1cr`.
+- API: `GET|PUT /admin/budgets/{tenant}/{app}` (`app_tokens`, `default_user_tokens`, `clear: ["app","default_user"]`),
+  `PUT|DELETE /admin/budgets/{tenant}/{app}/users/{user}` (`tokens`).
+
+Caveat: the user level trusts the app. The gateway knows the person only from the `x-dapp-user` header the app sends
+with its own key; an app that doesn't forward it (or sends a different name) is limited only by the app budget.
+
 ## Local model: `small` (removed; now a dashboard model)
 This section describes how `small` was first deployed by hand (`apps/llm-small`, still in the repo as an example). It was removed on 2026-11-25; the same model comes back from the
 **Models** tab (Qwen2.5 0.5B, name it `small`), see [models.md](models.md). The gateway can still serve a fixed model through `DAPP_LOCAL_MODELS`.

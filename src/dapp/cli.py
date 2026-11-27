@@ -53,6 +53,10 @@ source_app = typer.Typer(no_args_is_help=True, context_settings=HELP_OPTIONS,
                          help="Connect a new source (a Secret with its credentials and a Depot on top), list, replace "
                               "credentials, remove. Credentials come from environment variables or files, never arguments.")
 app.add_typer(source_app, name="source")
+budget_app = typer.Typer(no_args_is_help=True, context_settings=HELP_OPTIONS,
+                         help="Monthly token budgets of an app (the gateway refuses calls past them). Only the app's owner "
+                              "changes them; anyone may look.")
+app.add_typer(budget_app, name="budget")
 
 console = Console()
 err = Console(stderr=True)
@@ -1037,6 +1041,75 @@ def source_rm(name: str = typer.Argument(..., metavar="NAME"),
         _out(_platform().delete_source(name, keep_secret=keep_secret), lambda r: console.print(
             f"removed {r['name']}" + ("; its Secret too" if r["secret_deleted"] else "") +
             (f"; these pipelines used it: {', '.join(r['pipelines_affected'])}" if r["pipelines_affected"] else "")))
+    _run(go)
+
+
+# ---------------------------------------------------------------- budgets
+def _show_budget(v: dict) -> None:
+    from .usage import show_tokens
+    pct = f" ({v['app_pct']}%)" if v.get("app_pct") is not None else ""
+    console.print(f"[bold]{v['app']}[/bold] · {v['month']} (resets {v['resets_on']} UTC)\n"
+                  f"  app budget: {show_tokens(v['app_budget'])} · used {show_tokens(v['app_spent'])}{pct}"
+                  f" · left {show_tokens(v['app_left'])}\n"
+                  f"  per-user default: {show_tokens(v['default_user_budget']) if v['default_user_budget'] else 'none (users share the app budget)'}")
+    if v.get("note"):
+        console.print(f"  [yellow]{v['note']}[/yellow]")
+    rows = [{"user": u["user"], "used": show_tokens(u["spent"]),
+             "budget": (show_tokens(u["budget"]) + (" (own)" if u["own_budget"] else "")) if u["budget"] else "app's",
+             "left": show_tokens(u["left"]), "%": "" if u["pct"] is None else u["pct"]} for u in v["users"]]
+    if rows:
+        _table(rows, ["user", "used", "budget", "left", "%"])
+
+
+@budget_app.command("show")
+def budget_show(name: str = typer.Argument(..., metavar="APP")) -> None:
+    """This month's budgets and spend of an app: the app, and each user (owners see everyone; others their own row)."""
+    _run(lambda: _out(_platform().budgets(name), _show_budget))
+
+
+@budget_app.command("set")
+def budget_set(
+    name: str = typer.Argument(..., metavar="APP"),
+    app_tokens: str | None = typer.Option(None, "--app", help="the whole app's tokens a month: 5M, 50lakh, 5000000"),
+    per_user: str | None = typer.Option(None, "--per-user", help="each user's default a month, e.g. 200k"),
+    user: tuple[str, str] | None = typer.Option(None, "--user", help="one user's own budget: --user rajat 500k"),
+) -> None:
+    """Set monthly token budgets (owner only). A user with no budget of their own and no default may use the whole app's."""
+    from .usage import parse_tokens
+
+    def go():
+        if not (app_tokens or per_user or user):
+            raise ValueError("say what to set: --app 5M, --per-user 200k, or --user NAME 500k")
+        p = _platform()
+        out = None
+        if app_tokens or per_user:
+            out = p.set_budgets(name, app_tokens=parse_tokens(app_tokens) if app_tokens else None,
+                                per_user=parse_tokens(per_user) if per_user else None)
+        if user:
+            out = p.set_user_budget(name, user[0], parse_tokens(user[1]))
+        _out(out, _show_budget)
+    _run(go)
+
+
+@budget_app.command("rm")
+def budget_rm(
+    name: str = typer.Argument(..., metavar="APP"),
+    app_budget: bool = typer.Option(False, "--app", help="remove the app's budget (no ceiling)"),
+    per_user: bool = typer.Option(False, "--per-user", help="remove the default per-user budget"),
+    user: str | None = typer.Option(None, "--user", help="remove one user's own budget (they go back to the default)"),
+) -> None:
+    """Remove budgets (owner only)."""
+    def go():
+        if not (app_budget or per_user or user):
+            raise ValueError("say what to remove: --app, --per-user or --user NAME")
+        p = _platform()
+        out = None
+        clear = [c for c, on in (("app", app_budget), ("default_user", per_user)) if on]
+        if clear:
+            out = p.set_budgets(name, clear=clear)
+        if user:
+            out = p.delete_user_budget(name, user)
+        _out(out, _show_budget)
     _run(go)
 
 

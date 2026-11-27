@@ -95,6 +95,33 @@ class Prometheus:
         }
 
 
+def parse_tokens(text: str | int) -> int:
+    """A token amount as people write it: 5000000, 5M, 200k, 2.5m, 50L / 50lakh, 1cr. At least 1."""
+    if isinstance(text, int):
+        n = text
+    else:
+        t = str(text).strip().lower().replace(",", "").replace("_", "").replace(" ", "")
+        mult = {"k": 10**3, "m": 10**6, "b": 10**9, "l": 10**5, "lakh": 10**5, "lac": 10**5, "cr": 10**7, "crore": 10**7}
+        unit = next((u for u in sorted(mult, key=len, reverse=True) if t.endswith(u)), "")
+        num = t[: len(t) - len(unit)] if unit else t
+        try:
+            n = round(float(num) * mult.get(unit, 1))
+        except ValueError as e:
+            raise ValueError(f"{text!r} is not a token amount: write 5000000, 5M, 200k or 50lakh") from e
+    if n < 1:
+        raise ValueError("a budget is at least 1 token")
+    return n
+
+
+def show_tokens(n: int | None) -> str:
+    if n is None:
+        return "–"
+    for div, unit in ((10**9, "B"), (10**6, "M"), (10**3, "k")):
+        if n >= div:
+            return f"{n / div:.1f}".rstrip("0").rstrip(".") + unit
+    return str(n)
+
+
 class GatewayUsage:
     """Reads LLM usage from the dapp gateway's admin API, as the calling DataOS user."""
 
@@ -146,6 +173,21 @@ class GatewayUsage:
 
     def unregister_model(self, tenant: str, name: str) -> dict[str, Any]:
         return self._tool_call("DELETE", f"/admin/models/{tenant}/{name}")
+
+    # monthly token budgets (the gateway lets only the app's owner change them)
+    def budgets(self, tenant: str, app: str) -> dict[str, Any]:
+        return self._tool_call("GET", f"/admin/budgets/{tenant}/{app}")
+
+    def set_budgets(self, tenant: str, app: str, *, app_tokens: int | None = None, default_user_tokens: int | None = None,
+                    clear: list[str] | None = None) -> dict[str, Any]:
+        body = {k: v for k, v in (("app_tokens", app_tokens), ("default_user_tokens", default_user_tokens)) if v}
+        return self._tool_call("PUT", f"/admin/budgets/{tenant}/{app}", json={**body, "clear": clear or []})
+
+    def set_user_budget(self, tenant: str, app: str, user: str, tokens: int) -> dict[str, Any]:
+        return self._tool_call("PUT", f"/admin/budgets/{tenant}/{app}/users/{user}", json={"tokens": tokens})
+
+    def delete_user_budget(self, tenant: str, app: str, user: str) -> dict[str, Any]:
+        return self._tool_call("DELETE", f"/admin/budgets/{tenant}/{app}/users/{user}")
 
     def models_served_by(self, app: str) -> list[str]:
         """Models (e.g. "small") that this DataOS app serves for the gateway."""

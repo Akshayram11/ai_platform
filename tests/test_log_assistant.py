@@ -146,3 +146,18 @@ def test_gists_say_what_a_tool_found(la):
     assert mod._gist("tool error: nope") == "tool error: nope"
     cut = json.dumps({"total": 75, "returned": 75, "lines": [{"message": "x" * 50}] * 400}, indent=2)[:12000] + "\n…[cut]"
     assert mod._gist(cut) == "75 matching lines"                       # a result the toolbox cut short
+
+
+def test_a_used_up_budget_is_said_plainly(la, monkeypatch):
+    import httpx
+    from openai import RateLimitError
+    _mod, c, _, ai = la
+    msg = "alice has used their monthly token budget in app log-assistant (1,200 of 1,000 tokens); it resets on 2026-12-01 (UTC)."
+    body = {"error": {"type": "budget_exceeded", "message": msg}}
+    resp = httpx.Response(429, json=body, request=httpx.Request("POST", "https://gw/openai/v1/chat/completions"))
+
+    def refuse(**kw):
+        raise RateLimitError("Error code: 429", response=resp, body=body)
+    monkeypatch.setattr(ai.chat.completions, "create", refuse)
+    r = c.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}).json()
+    assert r["answer"] == f"Token budget used up. {msg}" and r["error"] == "budget_exceeded"

@@ -3,8 +3,8 @@
 ## Live now (poliks, as of 2026-11-25)
 | App | Image | Notes |
 |---|---|---|
-| `dapp` (dashboard) | `dataos-apps:0.1.35` | `objects: true`; Models, Claude Code, Pipelines and Sources |
-| `dapp-llm-gateway` | `dataos-apps:0.1.29` | Volume `dapp-gateway-data`; local model `small`; personal keys; model registry |
+| `dapp` (dashboard) | `dataos-apps:0.1.37` | `objects: true`; Models, Claude Code, Pipelines and Sources; token budget box on the LLM tab |
+| `dapp-llm-gateway` | `dataos-apps:0.1.37` | Volume `dapp-gateway-data`; local model `small`; personal keys; model registry; monthly token budgets (tables `budgets`, `budget_spend`) |
 | `model-<name>` | `llm-small:b12679-m1` | one per model deployed from the Models tab (own Volume `model-<name>-data`) |
 | `immortal-obj` | `dapp-runtime:python-3.12-r7` | Volume `immortal-obj` |
 | `chatbot` | `dapp-chatbot:0.1.14` | `llm`, `objects`, `metrics`; models `gpt-6-luna` and `small`; history |

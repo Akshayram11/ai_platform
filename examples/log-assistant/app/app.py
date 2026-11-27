@@ -20,7 +20,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from mcp_tools import Toolbox, ToolError
-from openai import OpenAI
+from openai import APIStatusError, OpenAI
 from pydantic import BaseModel, Field
 
 log = logging.getLogger("log-assistant")
@@ -171,10 +171,34 @@ def chat(req: ChatRequest, request: Request) -> dict:
                 steps.append({"tool": tc.function.name.split("__", 1)[-1], "args": _args(tc.function.arguments),
                               "result": _gist(result)})
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+    except APIStatusError as e:                  # e.g. 429 budget_exceeded from the gateway: its own words, not a stack of JSON
+        budget = _budget_message(e)
+        if budget:
+            return {"answer": budget, "steps": steps, "model": MODEL, "error": "budget_exceeded"}
+        log.exception("chat failed")
+        return {"answer": f"[error: the model answered {e.status_code}: {_error_text(e)}]", "steps": steps, "model": MODEL}
     except Exception as e:                       # say it in the chat rather than as a broken request
         log.exception("chat failed")
         return {"answer": f"[error: {type(e).__name__}: {e}]", "steps": steps, "model": MODEL}
     return {"answer": "[stopped: too many tool calls for one question; ask something narrower]", "steps": steps, "model": MODEL}
+
+
+def _error_of(e: APIStatusError) -> dict:
+    body = e.body if isinstance(e.body, dict) else {}
+    err = body.get("error", body)
+    return err if isinstance(err, dict) else {"message": str(err)}
+
+
+def _error_text(e: APIStatusError) -> str:
+    return str(_error_of(e).get("message") or e.message)
+
+
+def _budget_message(e: APIStatusError) -> str | None:
+    """The gateway's monthly token budget is used up: say so plainly (it names who, how much and when it resets)."""
+    err = _error_of(e)
+    if e.status_code != 429 or err.get("type") != "budget_exceeded":
+        return None
+    return f"Token budget used up. {err.get('message', '')}".strip()
 
 
 def _args(raw: str | None) -> dict:

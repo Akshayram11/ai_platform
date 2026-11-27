@@ -121,6 +121,8 @@ Rules for the code:
 ## LLMs: OpenAI models and models inside DataOS
 - `llm: true` in dapp.yaml: the app gets `DAPP_LLM_KEY` and `OPENAI_BASE_URL` (the dapp gateway meters tokens per app and per person).
   Use `OpenAI(api_key=os.environ["DAPP_LLM_KEY"])`. OpenAI model: `gpt-6-luna` (with function tools pass `reasoning_effort` "none").
+  The app's owner can set monthly token budgets (`dapp budget set APP --app 5M --per-user 200k`); past one the gateway
+  answers 429 (`budget_exceeded`, with the reset date): show that message to the person instead of failing.
   A model deployed with `dapp model deploy` works the same way: `model="<its name>"` (no OpenAI key, no per-token bill).
 - Models inside DataOS (small, CPU, private, prompts stay in DataOS):
   ```

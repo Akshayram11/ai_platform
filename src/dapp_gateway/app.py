@@ -15,6 +15,10 @@ Admin API (callers authenticate with their DataOS token/API key, verified by Hei
     DELETE /admin/keys/{tenant}/{app}                                    revoke an app's keys
     GET    /admin/keys                                                   your app keys (no secrets)
     GET    /admin/usage?app=&model=&since_hours=&group_by=app,model,day,end_user   token usage (+ cost if priced)
+    GET    /admin/budgets/<tenant>/<app>                     monthly token budgets and spend (owner: all; others: their own)
+    PUT    /admin/budgets/<tenant>/<app>                     {app_tokens, default_user_tokens, clear}   owner only
+    PUT    /admin/budgets/<tenant>/<app>/users/<user>        {tokens}   one person's own budget          owner only
+    DELETE /admin/budgets/<tenant>/<app>/users/<user>                                                  owner only
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from dapp.auth import Heimdall, Identity, IdentityUnavailable, token_from_headers
@@ -40,7 +44,17 @@ from dapp.config import Context
 
 from . import landing
 from .meter import Meter
-from .store import GROUPABLE, AppKey, LocalModel, Pricing, Store
+from .store import (
+    APP_BUDGET,
+    DEFAULT_USER_BUDGET,
+    GROUPABLE,
+    AppKey,
+    LocalModel,
+    Pricing,
+    Store,
+    month_of,
+    next_month_start,
+)
 from .tools import Vault, mount_tools
 
 log = logging.getLogger("dapp.gateway")
@@ -91,6 +105,17 @@ class KeyRequest(BaseModel):
     app: str
     tenant: str
     rotate: bool = False
+
+
+class BudgetRequest(BaseModel):
+    """Monthly token budgets of an app. A field left out is not changed; `clear` removes one ("app" or "default_user")."""
+    app_tokens: int | None = Field(None, ge=1, le=10**13)
+    default_user_tokens: int | None = Field(None, ge=1, le=10**13)
+    clear: list[str] = []
+
+
+class UserBudgetRequest(BaseModel):
+    tokens: int = Field(ge=1, le=10**13)
 
 
 class PersonalKeyRequest(BaseModel):
@@ -282,6 +307,93 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
         return {"owner": owner or "*", "since_hours": since_hours, "rows": rows, "total": total}
 
     # ------------------------------------------------------------ local models (deployed from the dashboard)
+    # ------------------------------------------------------------ budgets (monthly tokens, per app and per app user)
+    def require_budget_owner(request: Request, ident: Identity, tenant: str, app: str) -> None:
+        """Budgets are the app owner's alone: not gateway admins, not tenant admins (checked with DataOS every time)."""
+        if app.startswith(PERSONAL):
+            raise HTTPException(400, "personal keys have no budgets")
+        owners = app_owners(request, tenant, app)
+        if owners is None:
+            raise HTTPException(404, f"no app {tenant}/{app}")
+        if ident.user_id not in owners:
+            raise HTTPException(403, f"only an owner of app {tenant}/{app} may change its budgets")
+
+    def budget_view(tenant: str, app: str, viewer: str, full: bool) -> dict[str, Any]:
+        b = store.budgets(tenant, app)
+        month = month_of()
+        app_budget, default_user = b.get(APP_BUDGET), b.get(DEFAULT_USER_BUDGET)
+        app_spent = store.spent(tenant, app)
+        spends = store.user_spend(tenant, app) if full else {viewer: store.spent(tenant, app, viewer)}
+        people = set(spends) | ({u for u in b if u not in (APP_BUDGET, DEFAULT_USER_BUDGET)} if full else set())
+
+        def left(budget: int | None, spent: int) -> int | None:
+            return None if budget is None else max(0, budget - spent)
+
+        def pct(budget: int | None, spent: int) -> float | None:
+            return None if not budget else round(100 * spent / budget, 1)
+
+        users = []
+        for u in sorted(people, key=lambda x: -spends.get(x, 0)):
+            ub = b.get(u, default_user)
+            users.append({"user": u, "spent": spends.get(u, 0), "budget": ub, "own_budget": u in b,
+                          "left": left(ub, spends.get(u, 0)), "pct": pct(ub, spends.get(u, 0))})
+        return {"tenant": tenant, "app": app, "month": month, "resets_on": next_month_start(month).date().isoformat(),
+                "app_budget": app_budget, "default_user_budget": default_user, "app_spent": app_spent,
+                "app_left": left(app_budget, app_spent), "app_pct": pct(app_budget, app_spent),
+                "users": users, "can_edit": full}
+
+    @api.get("/admin/budgets/{tenant}/{app}")
+    def get_budgets(tenant: str, app: str, request: Request, ident: Identity = Depends(caller)) -> dict[str, Any]:
+        """The app's owner sees everything; anyone else sees the app's totals and their own row."""
+        if app.startswith(PERSONAL):
+            raise HTTPException(400, "personal keys have no budgets")
+        owners = app_owners(request, tenant, app) or []
+        return budget_view(tenant, app, ident.user_id, full=ident.user_id in owners)
+
+    @api.put("/admin/budgets/{tenant}/{app}")
+    def set_budgets(tenant: str, app: str, body: BudgetRequest, request: Request,
+                    ident: Identity = Depends(caller)) -> dict[str, Any]:
+        require_budget_owner(request, ident, tenant, app)
+        current = store.budgets(tenant, app)
+        app_budget = None if "app" in body.clear else (body.app_tokens or current.get(APP_BUDGET))
+        default_user = None if "default_user" in body.clear else (body.default_user_tokens or current.get(DEFAULT_USER_BUDGET))
+        if app_budget and default_user and default_user > app_budget:
+            raise HTTPException(422, f"the default user budget ({default_user}) can't be above the app budget ({app_budget})")
+        for field, user in (("app", APP_BUDGET), ("default_user", DEFAULT_USER_BUDGET)):
+            if field in body.clear:
+                store.set_budget(tenant, app, user, None, ident.user_id)
+        if body.app_tokens:
+            store.set_budget(tenant, app, APP_BUDGET, body.app_tokens, ident.user_id)
+        if body.default_user_tokens:
+            store.set_budget(tenant, app, DEFAULT_USER_BUDGET, body.default_user_tokens, ident.user_id)
+        log.info("budgets of %s/%s set by %s: %s", tenant, app, ident.user_id, body.model_dump())
+        view = budget_view(tenant, app, ident.user_id, full=True)
+        over = [u["user"] for u in view["users"] if u["own_budget"] and app_budget and (u["budget"] or 0) > app_budget]
+        if over:
+            view["note"] = f"these users' own budgets are above the app budget, which applies first: {', '.join(over)}"
+        return view
+
+    @api.put("/admin/budgets/{tenant}/{app}/users/{user}")
+    def set_user_budget(tenant: str, app: str, user: str, body: UserBudgetRequest, request: Request,
+                        ident: Identity = Depends(caller)) -> dict[str, Any]:
+        require_budget_owner(request, ident, tenant, app)
+        user = clean_user(user)
+        if not user or user in (APP_BUDGET, DEFAULT_USER_BUDGET):
+            raise HTTPException(422, "say which user (their DataOS id)")
+        app_budget = store.budgets(tenant, app).get(APP_BUDGET)
+        if app_budget and body.tokens > app_budget:
+            raise HTTPException(422, f"a user budget ({body.tokens}) can't be above the app budget ({app_budget})")
+        store.set_budget(tenant, app, user, body.tokens, ident.user_id)
+        log.info("budget of %s in %s/%s set to %s by %s", user, tenant, app, body.tokens, ident.user_id)
+        return budget_view(tenant, app, ident.user_id, full=True)
+
+    @api.delete("/admin/budgets/{tenant}/{app}/users/{user}")
+    def delete_user_budget(tenant: str, app: str, user: str, request: Request,
+                           ident: Identity = Depends(caller)) -> dict[str, Any]:
+        require_budget_owner(request, ident, tenant, app)
+        store.set_budget(tenant, app, clean_user(user), None, ident.user_id)
+        return budget_view(tenant, app, ident.user_id, full=True)
+
     def model_view(m: LocalModel) -> dict[str, Any]:
         return {"name": m.name, "tenant": m.tenant, "owner": m.owner, "app": m.app, "repo": m.repo,
                 "description": m.description, "created": m.created.isoformat(), "source": "dashboard"}
@@ -370,6 +482,35 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
             raise HTTPException(401, "invalid or revoked dapp app key")
         return k
 
+    def check_budget(key: AppKey, end_user: str) -> dict[str, str]:
+        """Before a call: refuse it (429) when the app, or this user in the app, has used the month's budget; otherwise
+        say what is left in headers. A user with no budget of their own and no default may use the app's whole budget.
+        The tokens of a call are only known after it, so the call that crosses the line finishes; the next is refused."""
+        if key.app.startswith(PERSONAL):
+            return {}
+        b = store.budgets(key.tenant, key.app)
+        if not b:
+            return {}
+        out: dict[str, str] = {}
+        resets = next_month_start(month_of()).date().isoformat()
+        app_budget = b.get(APP_BUDGET)
+        if app_budget is not None:
+            spent = store.spent(key.tenant, key.app)
+            if spent >= app_budget:
+                raise HTTPException(429, f"app {key.app} has used its monthly token budget ({spent:,} of {app_budget:,} "
+                                         f"tokens); it resets on {resets} (UTC). The app's owner can raise it.",
+                                    headers={"x-dapp-budget-left": "0"})
+            out["x-dapp-budget-left"] = str(app_budget - spent)
+        user_budget = b.get(end_user, b.get(DEFAULT_USER_BUDGET)) if end_user else None
+        if user_budget is not None:
+            spent = store.spent(key.tenant, key.app, end_user)
+            if spent >= user_budget:
+                raise HTTPException(429, f"{end_user} has used their monthly token budget in app {key.app} ({spent:,} of "
+                                         f"{user_budget:,} tokens); it resets on {resets} (UTC). Ask the app's owner "
+                                         f"to raise it.", headers={**out, "x-dapp-user-budget-left": "0"})
+            out["x-dapp-user-budget-left"] = str(user_budget - spent)
+        return out
+
     async def proxy(provider: str, path: str, request: Request, key: AppKey) -> Response:
         body = await request.body()
         req_json: dict | None = None
@@ -405,6 +546,7 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
         started = time.monotonic()
 
         end_user = clean_user(request.headers.get("x-dapp-user"))
+        budget_headers = check_budget(key, end_user)
 
         def record(status: int) -> None:
             try:
@@ -417,7 +559,7 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
         up_req = upstream.build_request(request.method, url, params=request.query_params, headers=headers,
                                         content=body)
         up = await upstream.send(up_req, stream=True)
-        resp_headers = {k: v for k, v in up.headers.items() if k.lower() not in DROP_RESP}
+        resp_headers = {**{k: v for k, v in up.headers.items() if k.lower() not in DROP_RESP}, **budget_headers}
         is_sse = "text/event-stream" in up.headers.get("content-type", "")
 
         if is_sse:
@@ -456,8 +598,9 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
     @api.exception_handler(HTTPException)
     async def _http_exc(_: Request, exc: HTTPException) -> JSONResponse:
         # Provider-shaped error so SDKs surface the message.
-        return JSONResponse({"type": "error", "error": {"type": "dapp_gateway_error", "message": exc.detail}},
-                            status_code=exc.status_code)
+        kind = "budget_exceeded" if exc.status_code == 429 else "dapp_gateway_error"
+        return JSONResponse({"type": "error", "error": {"type": kind, "message": exc.detail}},
+                            status_code=exc.status_code, headers=getattr(exc, "headers", None))
 
     return api
 

@@ -24,6 +24,7 @@ from sqlalchemy import (
     text,
     update,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 KEY_PREFIX = "dapp_"
@@ -74,6 +75,55 @@ class Usage(Base):
 
 
 GROUPABLE = ("app", "tenant", "owner", "model", "provider", "day", "end_user")
+
+APP_BUDGET, DEFAULT_USER_BUDGET = "", "*"     # Budget.user for the app's own budget, and for "every user" (the default)
+
+
+class Budget(Base):
+    """A monthly token budget (input + output + cached tokens, UTC calendar month) on an app: the app's ceiling (user ""),
+    the default for each of its users (user "*"), or one person's own (user = their DataOS id). No user budget at all means
+    a user may use the app's whole budget."""
+    __tablename__ = "budgets"
+    __table_args__ = (UniqueConstraint("tenant", "app", "user"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(64), index=True)
+    app: Mapped[str] = mapped_column(String(64), index=True)
+    user: Mapped[str] = mapped_column(String(128), default="")
+    tokens: Mapped[int] = mapped_column(Integer)
+    set_by: Mapped[str] = mapped_column(String(128), default="")
+    updated: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class BudgetSpend(Base):
+    """Running token counter per app (user "") and per app user, per month ("2026-11"). Bumped after every call, so a
+    budget check reads one row instead of adding up the month."""
+    __tablename__ = "budget_spend"
+    __table_args__ = (UniqueConstraint("tenant", "app", "user", "month"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(64), index=True)
+    app: Mapped[str] = mapped_column(String(64), index=True)
+    user: Mapped[str] = mapped_column(String(128), default="")
+    month: Mapped[str] = mapped_column(String(7))
+    tokens: Mapped[int] = mapped_column(Integer, default=0)
+
+
+def month_of(t: datetime | None = None) -> str:
+    return (t or now()).strftime("%Y-%m")
+
+
+def month_start(month: str) -> datetime:
+    y, m = (int(x) for x in month.split("-"))
+    return datetime(y, m, 1, tzinfo=UTC)
+
+
+def next_month_start(month: str) -> datetime:
+    y, m = (int(x) for x in month.split("-"))
+    return datetime(y + (m == 12), m % 12 + 1, 1, tzinfo=UTC)
+
+
+def tokens_of(row: dict) -> int:
+    """What counts against a budget: everything the model read or wrote, cached tokens included."""
+    return sum(int(row.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"))
 
 
 class Tool(Base):
@@ -206,8 +256,80 @@ class Store:
 
     # ---- usage
     def record(self, **row) -> None:
+        """One LLM call, and its tokens added to the month's counters of the app and of its user."""
+        used = tokens_of(row)
         with Session(self.engine) as s, s.begin():
             s.add(Usage(**row))
+            if used and not str(row.get("app", "")).startswith("user:"):        # personal keys have no budgets
+                month = month_of(row.get("ts"))
+                for user in {"", row.get("end_user") or ""}:
+                    self._bump(s, row["tenant"], row["app"], user, month, used)
+
+    def _bump(self, s: Session, tenant: str, app: str, user: str, month: str, used: int) -> None:
+        r = s.execute(update(BudgetSpend).where(BudgetSpend.tenant == tenant, BudgetSpend.app == app,
+                                                BudgetSpend.user == user, BudgetSpend.month == month)
+                      .values(tokens=BudgetSpend.tokens + used))
+        if r.rowcount:
+            return
+        # first call of the month: start from what the month already used, this call included (autoflush). Two first
+        # calls at once: the second insert fails on the unique key inside its savepoint, and it adds to the row instead.
+        seed = self._month_usage(s, tenant, app, user, month)
+        try:
+            with s.begin_nested():
+                s.add(BudgetSpend(tenant=tenant, app=app, user=user, month=month, tokens=seed))
+        except IntegrityError:
+            s.execute(update(BudgetSpend).where(BudgetSpend.tenant == tenant, BudgetSpend.app == app,
+                                                BudgetSpend.user == user, BudgetSpend.month == month)
+                      .values(tokens=BudgetSpend.tokens + used))
+
+    @staticmethod
+    def _month_usage(s: Session, tenant: str, app: str, user: str, month: str) -> int:
+        q = select(func.coalesce(func.sum(Usage.input_tokens + Usage.output_tokens + Usage.cache_read_tokens
+                                          + Usage.cache_write_tokens), 0)).where(
+            Usage.tenant == tenant, Usage.app == app, Usage.ts >= month_start(month), Usage.ts < next_month_start(month))
+        if user:
+            q = q.where(Usage.end_user == user)
+        return int(s.execute(q).scalar() or 0)
+
+    # ---- budgets
+    def spent(self, tenant: str, app: str, user: str = "", month: str | None = None) -> int:
+        month = month or month_of()
+        with Session(self.engine) as s:
+            v = s.execute(select(BudgetSpend.tokens).where(BudgetSpend.tenant == tenant, BudgetSpend.app == app,
+                                                           BudgetSpend.user == user, BudgetSpend.month == month)).scalar()
+            return int(v) if v is not None else self._month_usage(s, tenant, app, user, month)
+
+    def budgets(self, tenant: str, app: str) -> dict[str, int]:
+        """{"": app budget, "*": default per user, "<user>": that user's}; missing keys are not set."""
+        with Session(self.engine) as s:
+            return {b.user: b.tokens for b in s.execute(select(Budget).where(Budget.tenant == tenant, Budget.app == app))
+                    .scalars()}
+
+    def set_budget(self, tenant: str, app: str, user: str, tokens: int | None, by: str) -> None:
+        """Set (or, with tokens None, remove) one budget."""
+        with Session(self.engine) as s, s.begin():
+            if tokens is None:
+                s.execute(delete(Budget).where(Budget.tenant == tenant, Budget.app == app, Budget.user == user))
+                return
+            r = s.execute(update(Budget).where(Budget.tenant == tenant, Budget.app == app, Budget.user == user)
+                          .values(tokens=int(tokens), set_by=by, updated=now()))
+            if not r.rowcount:
+                s.add(Budget(tenant=tenant, app=app, user=user, tokens=int(tokens), set_by=by))
+
+    def user_spend(self, tenant: str, app: str, month: str | None = None) -> dict[str, int]:
+        """Tokens each user of the app used this month (from the counters, or the month's usage before them)."""
+        month = month or month_of()
+        with Session(self.engine) as s:
+            rows = {r.user: r.tokens for r in s.execute(select(BudgetSpend).where(
+                BudgetSpend.tenant == tenant, BudgetSpend.app == app, BudgetSpend.month == month,
+                BudgetSpend.user != "")).scalars()}
+            seen = s.execute(select(Usage.end_user).where(
+                Usage.tenant == tenant, Usage.app == app, Usage.end_user != "", Usage.ts >= month_start(month),
+                Usage.ts < next_month_start(month)).distinct()).scalars()
+            for u in seen:
+                if u not in rows:
+                    rows[u] = self._month_usage(s, tenant, app, u, month)
+            return rows
 
     def summary(self, *, owner: str | None, app: str | None, tenant: str | None, since_hours: int,
                 group_by: list[str], model: str | None = None) -> list[dict]:
