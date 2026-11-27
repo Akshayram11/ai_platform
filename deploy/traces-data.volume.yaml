@@ -1,0 +1,9 @@
+name: dapp-traces-data
+version: v2alpha
+type: volume
+description: Persist MLflow agent traces and artifacts
+tags: [dapp]
+volume:
+  size: 5Gi
+  type: disk
+  dataplane: poliksdp01

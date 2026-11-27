@@ -2,7 +2,7 @@
 name: dapp
 title: DataOS Apps
 description: See what you've deployed on DataOS, its compute and LLM usage, secrets and access
-image: docker.io/tmdcio/dataos-apps:0.1.44
+image: docker.io/tmdcio/dataos-apps:0.1.50
 command: [dapp-dashboard]
 port: 8080
 compute: engineering-compute
@@ -10,7 +10,7 @@ path: /dapp
 stripPath: true                 # the ingress removes the prefix; ROOT_PATH is only used to build links
 metrics: true
 objects: true                   # keeps access requests (immortal-obj object access-requests, owned by this app)
-replicas: 1                     # sessions are in memory; move them to Redis before scaling out
+replicas: 1                     # sessions are encrypted cookies, so more pods would work too
 resources: {cpu: 100m, memory: 256Mi, cpuLimit: "1", memoryLimit: 512Mi}
 access:
   users: ["*"]                  # any DataOS user may sign in; every call runs as them, so DataOS permissions still apply

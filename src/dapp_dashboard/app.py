@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -32,7 +32,7 @@ from urllib.parse import urlencode
 import httpx
 import yaml
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import SecretStr, ValidationError
 
@@ -103,6 +103,64 @@ class Session:
     expires: float
     refresh_token: str | None = None
     token_expires: float = 0.0  # 0 = token doesn't expire (API key)
+
+
+_UNREAD = object()
+
+
+class SessionBox:
+    """Sessions live in the browser, encrypted, not in this process: a deploy or a restart replaces the pod, and a
+    session kept in memory would sign everyone out (and break sign-ins that were half done).
+
+    The key comes from DAPP_SESSION_KEY or the OIDC client secret (a DataOS secret, the same on every pod). A sealed
+    session can be longer than one cookie allows, so it is split over dapp_session, dapp_session_1, ..."""
+
+    CHUNK = 3800
+    MAX_CHUNKS = 4
+
+    def __init__(self, key: bytes):
+        import base64
+        import hashlib
+
+        from cryptography.fernet import Fernet
+
+        self._f = Fernet(base64.urlsafe_b64encode(hashlib.sha256(b"dapp-dashboard-session:" + key).digest()))
+
+    def seal(self, s: Session) -> str:
+        import zlib
+
+        return self._f.encrypt(zlib.compress(json.dumps(asdict(s)).encode())).decode()
+
+    def open(self, value: str) -> Session | None:
+        import zlib
+
+        from cryptography.fernet import InvalidToken
+
+        if not value:
+            return None
+        try:
+            s = Session(**json.loads(zlib.decompress(self._f.decrypt(value.encode(), ttl=SESSION_TTL))))
+        except (InvalidToken, ValueError, TypeError, zlib.error):
+            return None
+        return s if s.expires > time.time() else None
+
+    @classmethod
+    def names(cls) -> list[str]:
+        return [SESSION_COOKIE] + [f"{SESSION_COOKIE}_{i}" for i in range(1, cls.MAX_CHUNKS)]
+
+    def read(self, cookies) -> Session | None:
+        return self.open("".join(cookies.get(n, "") for n in self.names()))
+
+    def write(self, resp, s: Session, **cookie) -> None:
+        value = self.seal(s)
+        parts = [value[i:i + self.CHUNK] for i in range(0, len(value), self.CHUNK)]
+        if len(parts) > self.MAX_CHUNKS:
+            raise ValueError("session too large for cookies")
+        for i, name in enumerate(self.names()):
+            if i < len(parts):
+                resp.set_cookie(name, parts[i], max_age=SESSION_TTL, **cookie)
+            else:
+                resp.delete_cookie(name, path=cookie.get("path", "/"))
 
 
 def fmt_bytes(n: float | None) -> str:
@@ -178,26 +236,28 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
             login = Login(settings, scopes=SCOPES + " offline_access")
     oidc = login
     prom_url = os.environ.get("DAPP_PROMETHEUS_URL") or (observability_url(f"https://{fqdn}") if fqdn else None)
-    sessions: dict[str, Session] = {}
+    session_key = os.environ.get("DAPP_SESSION_KEY", "").encode() or getattr(getattr(login, "s", None), "session_key", b"")
+    box = SessionBox(session_key or secrets.token_bytes(32))   # no key (local dev): sessions last until a restart
     sessions_created: dict[str, dict] = {}  # one-time display of newly created API keys
 
     api = FastAPI(title="dapp dashboard", version="0.1.0")
 
     # ------------------------------------------------------------------ identity
     def session_of(request: Request) -> Session | None:
-        sid = request.cookies.get(SESSION_COOKIE)
-        s = sessions.get(sid or "")
-        if s and s.expires > time.time():
-            if s.token_expires and s.token_expires - 60 < time.time():
+        s = getattr(request.state, "session", _UNREAD)
+        if s is _UNREAD:                                 # read (and maybe renew) once per request
+            s = box.read(request.cookies)
+            if s and s.token_expires and s.token_expires - 60 < time.time():
                 renewed = s.refresh_token and oidc and oidc.refresh(s.refresh_token)
                 if not renewed:
-                    sessions.pop(sid, None)  # token expired and can't be renewed: sign in again
-                    s = None
+                    s = None  # token expired and can't be renewed: sign in again
                 else:
                     s.token, s.refresh_token, s.token_expires = (
                         renewed["access_token"], renewed.get("refresh_token"), renewed["expires_at"])
-            if s:
-                return s
+                    request.state.session_renewed = True    # the middleware below sends the new cookie
+            request.state.session = s
+        if s:
+            return s
         token = token_from_headers(request.headers)
         if token:
             ident = heimdall.identify(token)
@@ -279,9 +339,15 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
     def cookie_path(request: Request) -> str:
         return request.scope.get("root_path", "") or "/"
 
-    def set_session_cookie(resp: RedirectResponse, request: Request, sid: str) -> None:
-        resp.set_cookie(SESSION_COOKIE, sid, max_age=SESSION_TTL, httponly=True, secure=not dev, samesite="lax",
-                        path=cookie_path(request))
+    def set_session_cookie(resp: Response, request: Request, s: Session) -> None:
+        box.write(resp, s, httponly=True, secure=not dev, samesite="lax", path=cookie_path(request))
+
+    @api.middleware("http")
+    async def _renewed_session(request: Request, call_next):
+        resp = await call_next(request)
+        if getattr(request.state, "session_renewed", False) and request.state.session:
+            set_session_cookie(resp, request, request.state.session)
+        return resp
 
     def safe_next(request: Request, target: str | None) -> str:
         root = request.scope.get("root_path", "")
@@ -295,30 +361,34 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         if oidc is None:  # no OIDC configured (local dev): paste an API key
             return render(request, "login.html", None, tenant=default_tenant)
         url, state = oidc.start(safe_next(request, next))
+        log.info("sign-in start: host=%s fwd-host=%s referer=%s cookies=%s", request.headers.get("host"),
+                 request.headers.get("x-forwarded-host"), (request.headers.get("referer") or "")[:80], sorted(request.cookies))
         resp = RedirectResponse(url, status_code=302)
-        resp.set_cookie(STATE_COOKIE, state, max_age=LOGIN_TTL, httponly=True, secure=not dev, samesite="lax",
+        resp.set_cookie(Login.state_cookie(state.split("|", 1)[0]), state, max_age=LOGIN_TTL, httponly=True, secure=not dev, samesite="lax",
                         path=cookie_path(request))
         return resp
 
     @api.get("/_dapp/callback")
     def oidc_callback(request: Request, code: str = "", state: str = ""):
-        raw = request.cookies.get(STATE_COOKIE, "")
-        expected, _, back_to = raw.partition("|")
+        expected, verifier, back_to = Login.find_state(request.cookies, state or "")
         failed = RedirectResponse(f"{request.scope.get('root_path', '')}/login-failed", status_code=302)
         if oidc is None or not expected or not secrets.compare_digest(expected, state or ""):
+            log.warning("sign-in callback: the state cookie is missing or doesn't match (host=%s scheme=%s "
+                        "fwd-host=%s cookies=%s)", request.headers.get("host"), request.url.scheme,
+                        request.headers.get("x-forwarded-host"), sorted(request.cookies))   # names only
             return failed
-        tokens = oidc.exchange(state, code)
+        tokens = oidc.exchange(state, code, verifier)
         try:
             ident = tokens and heimdall.identify(tokens["access_token"])
         except IdentityUnavailable:
             ident = None
         if not ident:
             return failed
-        sid = secrets.token_urlsafe(32)
-        sessions[sid] = Session(tokens["access_token"], ident.user_id, default_tenant, secrets.token_urlsafe(16),
-                                time.time() + SESSION_TTL, tokens.get("refresh_token"), tokens["expires_at"])
+        s = Session(tokens["access_token"], ident.user_id, default_tenant, secrets.token_urlsafe(16),
+                    time.time() + SESSION_TTL, tokens.get("refresh_token"), tokens["expires_at"])
         resp = RedirectResponse(safe_next(request, back_to), status_code=302)
-        set_session_cookie(resp, request, sid)
+        set_session_cookie(resp, request, s)
+        resp.delete_cookie(Login.state_cookie(expected), path=cookie_path(request))
         resp.delete_cookie(STATE_COOKIE, path=cookie_path(request))
         return resp
 
@@ -332,19 +402,18 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
             return back(request, "/login", err=f"DataOS sign-in unavailable: {e}")
         if ident is None:
             return back(request, "/login", err="That API key or token was not accepted by DataOS.")
-        sid = secrets.token_urlsafe(32)
-        sessions[sid] = Session(apikey.strip(), ident.user_id, tenant.strip() or default_tenant,
-                                secrets.token_urlsafe(16), time.time() + SESSION_TTL)
+        s = Session(apikey.strip(), ident.user_id, tenant.strip() or default_tenant,
+                    secrets.token_urlsafe(16), time.time() + SESSION_TTL)
         resp = back(request, "/")
-        set_session_cookie(resp, request, sid)
+        set_session_cookie(resp, request, s)
         return resp
 
     @api.post("/logout")
     def logout(request: Request):
-        sessions.pop(request.cookies.get(SESSION_COOKIE, ""), None)
         resp = RedirectResponse(f"{request.scope.get('root_path', '')}/login?signed_out=1" if oidc is None
                                 else f"{request.scope.get('root_path', '')}/signed-out", status_code=303)
-        resp.delete_cookie(SESSION_COOKIE, path=cookie_path(request))
+        for name in SessionBox.names():
+            resp.delete_cookie(name, path=cookie_path(request))
         return resp
 
     @api.get("/login-failed", response_class=HTMLResponse)
@@ -764,6 +833,11 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
             except GatewayError as e:
                 return back(request, "/tools?" + urlencode({"added": name}), err=f"{name}: saved, but sign-in could not be "
                                                                                  f"set up: {e}")
+            if found.get("needs_key"):
+                hint = (" For Data Product MCP use your DataOS API key (Keys page)." if name == "dataproduct-mcp" else "")
+                return back(request, "/tools?" + urlencode({"added": name}),
+                            err=f"{name}: saved, but the server asks for a key or token and does not offer sign-in. "
+                                f"Open Edit on it and paste one.{hint}")
             if found.get("needs_sign_in"):
                 return begin_sign_in(request, s, name, "/tools?" + urlencode({"added": name, **(
                     {"return": back_to} if _local_path(back_to) else {})}))
@@ -829,11 +903,6 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
             return platform_for(need(request)).status(name)
         except PlatformError as e:
             raise HTTPException(404, str(e))
-            if found.get("needs_key"):
-                hint = (" For Data Product MCP use your DataOS API key (Keys page)." if name == "dataproduct-mcp" else "")
-                return back(request, "/tools?" + urlencode({"added": name}),
-                            err=f"{name}: saved, but the server asks for a key or token and does not offer sign-in. "
-                                f"Open Edit on it and paste one.{hint}")
 
     @api.get("/api/apps/{name}/usage")
     def api_usage(request: Request, name: str, since_hours: int = 720):

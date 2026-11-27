@@ -31,10 +31,13 @@ spec:
         - {id: "engineering:dapp-gateway-providers", contextAlias: providers}
         - {id: "engineering:dapp-gateway-tools", contextAlias: tools}
         - {id: "engineering:dapp-gateway-local", contextAlias: local}
+        - {id: "engineering:dapp-traces-auth", contextAlias: traces}
       projections:
         envVars:
           - {key: OPENAI_API_KEY, template: "{{ secrets['providers'].OPENAI_API_KEY | base64_decode }}"}
           - {key: DAPP_GATEWAY_SECRET_KEY, template: "{{ secrets['tools'].DAPP_GATEWAY_SECRET_KEY | base64_decode }}"}
+          - {key: DAPP_TRACE_PASSWORD, template: "{{ secrets['traces'].DAPP_TRACE_PASSWORD | base64_decode }}"}
+          - {key: DAPP_TRACE_URL, templateType: none, template: "http://dapp-traces:8080"}
           - {key: LLM_SMALL_KEY, template: "{{ secrets['local'].LLM_SMALL_KEY | base64_decode }}"}
           - {key: DATABASE_URL, templateType: none, template: "sqlite:////data/gateway.db"}
           - {key: DATAOS_FQDN, templateType: none, template: "poliks.instance.dataos.cloud"}
@@ -44,5 +47,5 @@ spec:
             templateType: none
             template: '{"gpt-6-luna": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125}, "gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075}}'
   stackSpec:
-    image: docker.io/tmdcio/dataos-apps:0.1.47
+    image: docker.io/tmdcio/dataos-apps:0.1.50
     command: [dapp-gateway]

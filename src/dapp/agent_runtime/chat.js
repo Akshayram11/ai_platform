@@ -15,7 +15,7 @@ function agentText(element, text) {
   }
 }
 
-function setupAgentChat(panel, send) {
+function setupAgentChat(panel, send, traceUrl) {
   const form = panel.querySelector("form");
   const input = form.elements.message;
   const button = form.querySelector('button[type="submit"]');
@@ -24,7 +24,23 @@ function setupAgentChat(panel, send) {
   let history = [];
   let pending;
 
-  function add(role, text, steps = []) {
+  function showTrace(element, id) {
+    if (!/^tr-[a-f0-9]{32}$/.test(id || "")) return;
+    const link = document.createElement(traceUrl ? "a" : "code");
+    link.textContent = traceUrl ? "View trace" : id;
+    if (traceUrl) {
+      link.href = traceUrl + encodeURIComponent(id);
+      link.target = "_blank";
+      link.rel = "noopener";
+    }
+    const detail = document.createElement("small");
+    detail.className = "agent-trace-link";
+    if (!traceUrl) detail.append("Trace ");
+    detail.append(link);
+    element.append(detail);
+  }
+
+  function add(role, text, steps = [], traceId) {
     const entry = document.createElement("article");
     entry.className = "agent-turn";
     const label = document.createElement("strong");
@@ -45,6 +61,7 @@ function setupAgentChat(panel, send) {
       details.append(summary, list);
       entry.append(details);
     }
+    showTrace(entry, traceId);
     log.append(entry);
     log.scrollTop = log.scrollHeight;
   }
@@ -74,11 +91,12 @@ function setupAgentChat(panel, send) {
       const result = await send(messages, controller.signal);
       if (controller.signal.aborted) return;
       history = [...messages, {role: "assistant", content: result.answer}];
-      add("Agent", result.answer, result.steps);
+      add("Agent", result.answer, result.steps, result.trace_id);
       status.textContent = "";
     } catch (error) {
       if (controller.signal.aborted) return;
       agentText(status, error.message);
+      showTrace(status, error.traceId);
       input.value = content;
     } finally {
       if (pending === controller) {
@@ -103,7 +121,9 @@ async function agentJson(url, options = {}) {
     if (Array.isArray(reason)) {
       throw new Error(reason.map(item => item.msg).join(". "));
     }
-    throw new Error(typeof reason === "string" ? reason : "The agent request failed.");
+    const failure = new Error(typeof reason === "string" ? reason : "The agent request failed.");
+    failure.traceId = payload.trace_id;
+    throw failure;
   }
   return payload;
 }

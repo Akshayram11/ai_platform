@@ -111,6 +111,8 @@ def test_real_dashboard_routes_save_preview_publish_and_rollback(monkeypatch, tm
     record = c.post(url, json=DRAFT, headers=headers).json()
     agent_url = url + "/" + record["id"]
     assert record["applied"] is None
+    assert "trace_enabled" not in record["draft"]
+    assert 'name="trace_enabled"' in page.text
     assert c.get(url).json()["agents"][0]["title"] == DRAFT["title"]
     assert TestClient(app, base_url="https://testserver", root_path="/dapp",
                       headers={"Authorization": "Bearer bob-token"}).get(agent_url).status_code == 404
@@ -157,17 +159,40 @@ def test_real_dashboard_routes_save_preview_publish_and_rollback(monkeypatch, tm
                               json={"messages": message}).json()["answer"] == "Checked the logs."
     assert views[-1][2]["key"] == "published-key" and "tool_token" not in views[-1][2]
 
-    c.put(agent_url, headers=headers, json={**DRAFT, "instructions": "New draft"})
+    c.put(agent_url, headers=headers, json={**DRAFT, "instructions": "New draft", "trace_enabled": True})
     failing_deployment = True
     assert c.post(agent_url + "/publish", headers=headers, json={}).status_code == 502
     assert c.get(agent_url).json()["applied"] == 1
     failing_deployment = False
     second = c.post(agent_url + "/publish", headers=headers, json={}).json()
     assert second["agent"]["applied"] == 2 and second["url"] == first["url"]
+    assert deployed[-1][1]["config"]["trace_enabled"] is True
     rolled_back = c.post(agent_url + "/publish", headers=headers, json={"version": 1}).json()
     assert rolled_back["agent"]["applied"] == 1
     assert rolled_back["agent"]["draft"]["instructions"] == "New draft"
     assert deployed[-1] == deployed[0]
+
+    trace_id = "tr-" + "1" * 32
+
+    def trace_backend(url, *, params, headers, timeout):
+        assert url.endswith("/agent-traces")
+        assert headers == {"Authorization": "Bearer published-key", "x-dapp-user": "alice"}
+        assert params["app"] == first["agent"]["app"] and params["trace_id"] == trace_id
+        return httpx.Response(200, request=httpx.Request("GET", url), json={
+            "trace": {"id": trace_id, "started": "2026-11-27T00:00:00Z", "status": "OK", "steps": [
+                {"name": "chat", "model": "small", "actual_model": "qwen/small", "ok": True,
+                 "duration_ms": 50, "backend": "local", "input_tokens": 12, "output_tokens": 4},
+            ]},
+        })
+
+    monkeypatch.setattr(httpx, "get", trace_backend)
+    trace_url = f"/dapp/traces?agent={record['id']}&trace={trace_id}"
+    trace_page = c.get(trace_url)
+    assert trace_page.status_code == 200
+    assert 'href="/dapp/traces" aria-current="page"' in trace_page.text
+    assert "small → qwen/small" in trace_page.text and "Self-hosted" in trace_page.text
+    assert TestClient(app, base_url="https://testserver", root_path="/dapp",
+                      headers={"Authorization": "Bearer bob-token"}).get(trace_url).status_code == 404
 
     # Delete: the agent leaves the list, and its app goes with it (only when it is this agent's own app).
     app_name = first["agent"]["app"]
@@ -181,8 +206,10 @@ def test_real_dashboard_routes_save_preview_publish_and_rollback(monkeypatch, tm
     assert len(removed) == 1
 
 
-def test_engine_calls_only_selected_tools_and_reports_its_steps():
+@pytest.mark.parametrize("trace_enabled", [False, True])
+def test_engine_calls_only_selected_tools_and_reports_its_steps(trace_enabled):
     calls = []
+    reports = []
 
     def respond(request):
         payload = json.loads(request.content)
@@ -202,6 +229,9 @@ def test_engine_calls_only_selected_tools_and_reports_its_steps():
                 result = {"structuredContent": {"logs": ["ERROR upstream unavailable"]}}
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": payload["id"], "result": result})
 
+        if path == "/agent-traces":
+            reports.append(payload)
+            return httpx.Response(201)
         assert path == "/openai/v1/chat/completions"
         assert request.headers["Authorization"] == "Bearer app-key"
         assert request.headers["x-dapp-user"] == "alice"
@@ -218,12 +248,25 @@ def test_engine_calls_only_selected_tools_and_reports_its_steps():
             message = {"content": "The upstream service was unavailable."}
         return httpx.Response(200, json={"choices": [{"message": message}]})
 
-    result = run_agent(AgentConfig.model_validate(DRAFT), Chat(messages=[{"role": "user", "content": "Check logs"}]),
+    config = AgentConfig.model_validate({**DRAFT, "trace_enabled": trace_enabled})
+    result = run_agent(config, Chat(messages=[{"role": "user", "content": "Check logs"}]),
                        gateway="http://gateway.test", key="app-key", tenant="engineering", user="alice",
                        tool_token="dataos-login", transport=httpx.MockTransport(respond))
     assert result["answer"] == "The upstream service was unavailable."
     assert [step["ok"] for step in result["steps"]] == [True, False]
     assert calls == ["search_logs"]
+    if trace_enabled:
+        report, = reports
+        assert report["trace_id"] == result["trace_id"]
+        assert [span["kind"] for span in report["steps"]] == [
+            "discover_tools", "chat", "execute_tool", "execute_tool", "chat",
+        ]
+        assert report["steps"][2]["function"] == "search_logs"
+        assert report["steps"][3]["error_type"] == "unavailable"
+        for private in ("Check logs", "ERROR upstream unavailable", "delete_app", "dataos-login"):
+            assert private not in json.dumps(report)
+    else:
+        assert not reports and "trace_id" not in result
 
 
 def test_action_is_never_replayed_after_an_uncertain_gateway_error():
@@ -274,3 +317,31 @@ def test_publishing_says_what_sign_in_tools_mean():
              {"name": "jira", "auth_mode": "key"}]
     notes = sign_in_notes(tools, ["notion", "team", "wiki", "jira"])
     assert len(notes) == 2 and "asks each person to sign in" in notes[0] and "rajat's account, which is not connected" in notes[1]
+
+
+def test_trace_storage_failure_does_not_fail_agent_and_model_error_has_trace():
+    stored = []
+    config = AgentConfig(title="Trace smoke", model="small", instructions="Help", trace_enabled=True)
+    chat = Chat(messages=[{"role": "user", "content": "Hello"}])
+
+    def respond(request):
+        if request.url.path == "/agent-traces":
+            report = json.loads(request.content)
+            stored.append(report)
+            return httpx.Response(201 if not report["ok"] else 503)
+        return httpx.Response(200 if len(stored) == 0 else 429, headers={"x-dapp-model-backend": "local"},
+                              json={"model": "qwen/small", "usage": {"prompt_tokens": 8, "completion_tokens": 0},
+                                    "choices": [{"message": {"content": "Hi"}}]})
+
+    options = {"gateway": "http://gateway.test", "key": "key", "tenant": "engineering", "user": "alice",
+               "transport": httpx.MockTransport(respond), "version": 2}
+    assert run_agent(config, chat, **options) == {"answer": "Hi", "steps": []}
+    assert stored[0]["version"] == 2
+    step = stored[0]["steps"][0]
+    assert (step["backend"], step["response_model"], step["input_tokens"], step["output_tokens"]) == (
+        "local", "qwen/small", 8, 0,
+    )
+    with pytest.raises(AgentError, match="429") as failure:
+        run_agent(config, chat, **options)
+    assert failure.value.trace_id == stored[1]["trace_id"]
+    assert stored[1]["steps"][0]["status_code"] == 429

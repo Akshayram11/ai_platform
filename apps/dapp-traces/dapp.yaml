@@ -1,0 +1,19 @@
+name: dapp-traces
+title: Agent Traces
+description: MLflow trace storage for DataOS Agent Builder
+image: docker.io/tmdcio/dapp-traces:0.1.1
+command: [python, /app/server.py]    # the image's CMD; DataOS apps must name it
+port: 8080
+compute: engineering-compute
+hostname: dapp-traces
+path: /dapp-traces
+stripPath: true
+public: false
+login: false                    # DataOS protects the ingress. The internal hostname still requires Basic auth.
+resources: {cpu: 250m, memory: 1Gi, cpuLimit: "2", memoryLimit: 3Gi}
+secrets: [dapp-traces-auth]
+volumes:
+  - id: dapp-traces-data
+    directory: /data
+env:
+  MLFLOW_SERVER_ALLOWED_HOSTS: dapp-traces,dapp-traces:8080

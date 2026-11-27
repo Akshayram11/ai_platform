@@ -21,6 +21,10 @@
         <a href="{{ root }}/models" target="_blank" rel="noopener" id="host-model">+ Host a model in DataOS</a></p>
     </div>
     <label class="agent-field"><span>System instructions</span><textarea name="instructions" required maxlength="12000" placeholder="Tell the agent what to do and what evidence to use."></textarea></label>
+    <label class="agent-trace-toggle">
+      <input type="checkbox" name="trace_enabled">
+      <span>Enable tracing <small>Record model calls, MCP tools, timing and errors. Publish to apply this setting to the app.</small></span>
+    </label>
     <fieldset class="agent-tools">
       <legend>MCP servers</legend>
       <div class="agent-model-help"><span class="muted">Each selected server exposes its available functions to this agent.</span>
@@ -47,6 +51,7 @@
   <div class="agent-toolbar"><h2>Versions</h2><div class="row" id="app-links" hidden>
     <a id="open-app" target="_blank" rel="noopener">Open app</a>
     <a id="manage-app">Manage app</a>
+    <a id="app-traces">View traces</a>
   </div></div>
   <div class="muted" id="app-state"></div>
   <div class="agent-version-list" role="region" aria-label="Version history" tabindex="0">
@@ -89,12 +94,13 @@
     return {
       title: form.elements.title.value.trim(), model: form.elements.model.value,
       instructions: form.elements.instructions.value.trim(),
+      trace_enabled: form.elements.trace_enabled.checked,
       tools: [...form.querySelectorAll('input[name="tool"]:checked')].map(tool => tool.value),
     };
   }
 
   const resetChat = setupAgentChat(find("playground"), (messages, signal) =>
-    api("/preview", "POST", {config: config(), messages}, signal));
+    api("/preview", "POST", {config: config(), messages}, signal), root + "/traces?trace=");
 
   function updateCatalog(draft) {
     picker.replaceChildren(new Option("New agent", ""));
@@ -228,6 +234,7 @@
     if (agent?.applied) {
       find("open-app").href = "/" + agent.app + "/";
       find("manage-app").href = root + "/apps/" + agent.app;
+      find("app-traces").href = root + "/traces?agent=" + encodeURIComponent(agent.id);
     }
     const rows = find("version-rows");
     rows.replaceChildren();
@@ -253,6 +260,7 @@
     const draft = record?.draft || {};
     form.elements.title.value = draft.title || "";
     form.elements.instructions.value = draft.instructions || "";
+    form.elements.trace_enabled.checked = draft.trace_enabled === true;
     updateCatalog(draft);
     showVersions();
   }

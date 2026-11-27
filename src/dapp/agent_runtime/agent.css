@@ -58,3 +58,8 @@
   .agent-workspace { grid-template-columns: minmax(0, 1fr); }
   .agent-head { margin-bottom: 14px; }
 }
+
+.agent-trace-toggle { display: flex; gap: .6rem; align-items: baseline; margin: 1rem 0; }
+.agent-trace-toggle input { width: auto; flex: none; }
+.agent-trace-toggle small, .agent-trace-link { display: block; color: var(--muted); margin-top: .35rem; }
+.agent-trace-link code { overflow-wrap: anywhere; }

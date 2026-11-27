@@ -43,6 +43,7 @@ from dapp.client import DataOS, DataOSError
 from dapp.config import Context
 
 from . import landing
+from .agent_traces import mount_agent_traces
 from .meter import Meter
 from .store import (
     APP_BUDGET,
@@ -92,7 +93,7 @@ def local_models() -> dict[str, dict]:
 # Never forward the caller's credentials or hop-by-hop headers upstream.
 DROP_REQ = {"x-dapp-user", "host", "authorization", "x-api-key", "apikey", "content-length", "connection", "accept-encoding",
             "cookie", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip"}
-DROP_RESP = {"content-length", "content-encoding", "transfer-encoding", "connection"}
+DROP_RESP = {"content-length", "content-encoding", "transfer-encoding", "connection", "x-dapp-model-backend"}
 
 
 def clean_user(raw: str | None) -> str:
@@ -145,7 +146,8 @@ PERSONAL = "user:"  # app name of a personal key; ':' can't appear in a DataOS a
 def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
                upstream_transport: httpx.AsyncBaseTransport | None = None,
                dataos_transport: httpx.BaseTransport | None = None, vault: Vault | None = None,
-               oauth_transport: httpx.BaseTransport | None = None) -> FastAPI:
+               oauth_transport: httpx.BaseTransport | None = None,
+               trace_transport: httpx.BaseTransport | None = None) -> FastAPI:
     fqdn = os.environ.get("DATAOS_FQDN", "")
     store = store or Store()
     heimdall = heimdall or (Heimdall(f"https://{fqdn}") if fqdn else None)
@@ -561,6 +563,8 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
                                         content=body)
         up = await upstream.send(up_req, stream=True)
         resp_headers = {**{k: v for k, v in up.headers.items() if k.lower() not in DROP_RESP}, **budget_headers}
+        if provider in ("openai", "local"):
+            resp_headers["x-dapp-model-backend"] = provider
         is_sse = "text/event-stream" in up.headers.get("content-type", "")
 
         if is_sse:
@@ -593,6 +597,7 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
     async def openai(path: str, request: Request, key: AppKey = Depends(app_key)) -> Response:
         return await proxy("openai", path, request, key)
 
+    mount_agent_traces(api, app_key, clean_user, trace_transport)
     mount_tools(api, store=store, heimdall=heimdall, caller=caller, admins=admins, upstream=upstream,
                 clean_user=clean_user, vault=vault,
                 oauth_http=httpx.Client(timeout=httpx.Timeout(20, connect=5), transport=oauth_transport))

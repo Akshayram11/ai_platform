@@ -21,7 +21,7 @@ class FakeLogin:
     def start(self, return_to):
         return "https://x.dataos.cloud/oidc/auth?client_id=c", f"st1|{return_to}"
 
-    def exchange(self, state, code):
+    def exchange(self, state, code, verifier=""):
         if state == "st1" and code == "good-code":
             return {"access_token": "oidc-access", "refresh_token": "r1", "expires_at": time.time() + 300}
         return None
@@ -48,7 +48,7 @@ def test_oidc_login_is_automatic(monkeypatch):
     # /login goes straight to DataOS (no form), remembering where to come back to
     r = c.get("/login", follow_redirects=False)
     assert r.status_code == 302 and r.headers["location"].startswith("https://x.dataos.cloud/oidc/auth")
-    assert "dapp_login_state" in r.cookies
+    assert "dapp_login_state_st1" in r.cookies
 
     # a wrong code lands on a stop page, never back in the login loop
     r = c.get("/_dapp/callback?code=bad&state=st1", follow_redirects=False)
@@ -81,7 +81,7 @@ def test_callback_rejects_state_mismatch(monkeypatch):
 
 def test_expiring_token_is_refreshed(monkeypatch):
     class ShortLived(FakeLogin):
-        def exchange(self, state, code):
+        def exchange(self, state, code, verifier=""):
             t = super().exchange(state, code)
             return t and {**t, "expires_at": time.time() + 30}  # inside the 60s refresh margin
 
@@ -95,7 +95,7 @@ def test_expiring_token_is_refreshed(monkeypatch):
 
 def test_failed_refresh_signs_out(monkeypatch):
     class NoRefresh(FakeLogin):
-        def exchange(self, state, code):
+        def exchange(self, state, code, verifier=""):
             t = super().exchange(state, code)
             return t and {**t, "expires_at": time.time() + 30}
 

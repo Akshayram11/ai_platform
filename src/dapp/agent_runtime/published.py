@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agent_runtime.engine import AgentConfig, AgentError, Chat, run_agent
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 ROOT = Path(__file__).parent
@@ -47,10 +47,12 @@ def health() -> dict:
 
 
 @app.post("/api/chat")
-def chat(req: Chat, request: Request) -> dict:
+def chat(req: Chat, request: Request):
     user = viewer(request)
     try:
         return run_agent(config, req, gateway=gateway, key=os.environ.get("DAPP_LLM_KEY", ""),
-                         tenant=os.environ.get("DATAOS_TENANT_ID", ""), user=user)
+                         tenant=os.environ.get("DATAOS_TENANT_ID", ""), user=user, version=record["version"])
     except AgentError as exc:
+        if exc.trace_id:
+            return JSONResponse({"detail": str(exc), "trace_id": exc.trace_id}, status_code=502)
         raise HTTPException(502, str(exc)) from exc

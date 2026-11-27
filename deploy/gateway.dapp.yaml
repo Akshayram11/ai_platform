@@ -6,7 +6,7 @@
 # .env.gateway (gitignored): OPENAI_API_KEY=..., optionally ANTHROPIC_API_KEY=..., DATABASE_URL=postgresql+psycopg://...
 name: dapp-llm-gateway          # moving from inline disk to a Volume means recreating the app once (dapp rm, then deploy)
 description: LLM gateway for DataOS apps; meters tokens per app
-image: docker.io/tmdcio/dataos-apps:0.1.47
+image: docker.io/tmdcio/dataos-apps:0.1.50
 command: [dapp-gateway]
 port: 8080
 compute: engineering-compute
@@ -23,6 +23,7 @@ env:
   DATABASE_URL: sqlite:////data/gateway.db     # overridden by the secret when it sets DATABASE_URL
   # MCP tools: plain-http in-cluster hosts the gateway may proxy to (everything else must be public https)
   DAPP_TOOL_INTERNAL_HOSTS: demo-tools,immortal-obj,dapp-monitor
+  DAPP_TRACE_URL: http://dapp-traces:8080
   # Models served inside DataOS are deployed from the dashboard's Models tab and registered in the gateway. A fixed one can still be
   # configured here (apps/llm-small was one; it was removed on 2026-11-25), keyed by name, with its key from dapp-gateway-local:
   # DAPP_LOCAL_MODELS: '{"small": {"url": "http://llm-small:8080", "key_env": "LLM_SMALL_KEY"}}'
@@ -44,3 +45,4 @@ secrets:
   #   sed 's/^LLAMA_API_KEY=/LLM_SMALL_KEY=/' apps/llm-small/.env > .env.gateway-local
   #   dapp secret set dapp-llm-gateway dapp-gateway-local --from-env-file .env.gateway-local --no-attach
   - dapp-gateway-local
+  - dapp-traces-auth

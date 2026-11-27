@@ -14,11 +14,12 @@ from uuid import uuid4
 
 import httpx
 from fastapi import HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from dapp.agent_runtime import engine
 from dapp.agent_runtime.engine import AgentConfig, AgentError, Chat
+from dapp.agent_runtime.tracing import TraceId
 from dapp.client import DataOSError
 from dapp.ctl import WriteError
 from dapp.platform import PlatformError, gateway_internal_url
@@ -28,8 +29,13 @@ from dapp_objects import Client, ObjectsError
 
 log = logging.getLogger("dapp.dashboard.agents")
 RUNTIME = Path(engine.__file__).parent
-RUNTIME_FILES = ("__init__.py", "engine.py", "mcp_transport.py")
+RUNTIME_FILES = ("__init__.py", "engine.py", "mcp_transport.py", "tracing.py")
 APP_FILES = ("published.py", "published.html", "chat.js", "agent.css")
+
+
+def config_payload(config: AgentConfig):
+    # Older snapshots did not have this field. Keep the same version identity when tracing is off.
+    return config.model_dump_json(exclude=None if config.trace_enabled else {"trace_enabled"})
 
 
 class Preview(Chat):
@@ -90,16 +96,16 @@ class Registry:
         slug = re.sub(r"[^a-z0-9]+", "-", config.title.lower()).strip("-")[:26].rstrip("-") or "chat"
         self.db.sql("insert into agents (id, tenant, owner, app, draft) values (?, ?, ?, ?, ?)",
                     [agent_id, session.tenant, session.user_id, f"agent-{slug}-{agent_id[:12]}",
-                     config.model_dump_json()])
+                     config_payload(config)])
         return self.get(session, agent_id)
 
     def save(self, session, agent_id, config: AgentConfig):
         self.db.sql("update agents set draft = ? where id = ? and tenant = ? and owner = ?",
-                    [config.model_dump_json(), agent_id, session.tenant, session.user_id])
+                    [config_payload(config), agent_id, session.tenant, session.user_id])
         return self.get(session, agent_id)
 
     def snapshot(self, agent_id, config: AgentConfig):
-        payload = config.model_dump_json()
+        payload = config_payload(config)
         self.db.sql("insert or ignore into agent_versions (id, version, config) "
                     "select ?, coalesce(max(version), 0) + 1, ? from agent_versions where id = ?",
                     [agent_id, payload, agent_id])
@@ -158,7 +164,7 @@ def deploy_version(platform, session, agent, config: AgentConfig, version: int):
             shutil.copyfile(RUNTIME / filename, package / filename)
         for filename in APP_FILES:
             shutil.copyfile(RUNTIME / filename, source / filename)
-        (source / "agent.json").write_text(json.dumps({"config": config.model_dump(), "version": version}))
+        (source / "agent.json").write_text(json.dumps({"config": json.loads(config_payload(config)), "version": version}))
         spec = AppSpec(
             name=agent["app"], title=config.title, description="Published by DataOS Agent Builder",
             tenant=session.tenant, runtime="python-3.12",
@@ -224,6 +230,33 @@ def mount_agents(api, *, need, check_csrf, render, gateway_for, platform_for, ap
     def page(request: Request):
         return render(request, "agents.html", need(request))
 
+    @api.get("/traces", response_class=HTMLResponse)
+    def traces(request: Request, agent: str = "", trace: TraceId | None = None, page: str = ""):
+        session = need(request)
+        agents, current, result, problem = [], None, {}, ""
+        try:
+            agents = registry().list(session)
+            if agent:
+                current = registry().get(session, agent)  # checks tenant and owner before reading MLflow
+            key = os.environ.get("DAPP_LLM_KEY")
+            service_tenant = os.environ.get("DATAOS_TENANT_ID")
+            if not key or (service_tenant and service_tenant != session.tenant):
+                problem = "Trace storage is unavailable for this workspace."
+            else:
+                params = {"app": current["app"] if current else "", "page": page, "tenant": session.tenant}
+                if trace:
+                    params["trace_id"] = trace
+                response = httpx.get(f"{gateway_internal_url().rstrip('/')}/agent-traces", params=params,
+                                     headers={"Authorization": f"Bearer {key}", "x-dapp-user": session.user_id},
+                                     timeout=4.0)
+                if response.status_code == 404 and trace:
+                    raise HTTPException(404, "Trace not found.")
+                response.raise_for_status()
+                result = response.json()
+        except (httpx.HTTPError, ObjectsError, ValueError):
+            problem = "Could not load traces. Check that the trace service and gateway are running."
+        return render(request, "traces.html", session, agents=agents, current=current, result=result, problem=problem)
+
     @api.get("/assets/agent-chat.js", include_in_schema=False)
     def chat_js():
         return FileResponse(RUNTIME / "chat.js", media_type="text/javascript")
@@ -283,7 +316,11 @@ def mount_agents(api, *, need, check_csrf, render, gateway_for, platform_for, ap
             return engine.run_agent(req.config, req, gateway=gateway_internal_url(),
                                     key=os.environ.get("DAPP_LLM_KEY", ""), tenant=s.tenant,
                                     user=s.user_id, tool_token=s.token)
-        except (AgentError, GatewayError) as exc:
+        except AgentError as exc:
+            if exc.trace_id:
+                return JSONResponse({"error": str(exc), "trace_id": exc.trace_id}, status_code=502)
+            raise HTTPException(502, str(exc)) from exc
+        except GatewayError as exc:
             raise HTTPException(502, str(exc)) from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise HTTPException(502, "The gateway catalog is unavailable.") from exc

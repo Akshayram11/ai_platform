@@ -187,12 +187,39 @@ class Login:
         q = urlencode({"response_type": "code", "client_id": self.s.client_id, "redirect_uri": self.redirect_uri,
                        "scope": self.scopes, "state": state, "code_challenge": challenge,
                        "code_challenge_method": "S256"})
-        return f"{self.metadata()['authorization_endpoint']}?{q}", f"{state}|{return_to}"
+        # The browser keeps the verifier in the state cookie, so whichever pod gets the callback can finish the
+        # sign-in (a deploy replaces the pod; the one that started the sign-in may be gone).
+        return (f"{self.metadata()['authorization_endpoint']}?{q}",
+                f"{state}|{verifier}.{int(now + LOGIN_TTL)}|{return_to}")
 
-    def exchange(self, state: str, code: str) -> dict | None:
-        """Swap the callback code for tokens: {access_token, refresh_token?, expires_at}."""
+    @staticmethod
+    def state_cookie(state: str) -> str:
+        """One cookie per sign-in, so two sign-ins started at once (a page and its background request both sent to
+        /login) don't overwrite each other's state."""
+        return f"{STATE_COOKIE}_{state}"
+
+    @staticmethod
+    def find_state(cookies: dict[str, str], state: str) -> tuple[str, str, str]:
+        """The state cookie for the `state` DataOS sent back (or the single one older versions set)."""
+        raw = cookies.get(Login.state_cookie(state)) if state.replace("-", "").replace("_", "").isalnum() else None
+        return Login.read_state(raw or cookies.get(STATE_COOKIE, ""))
+
+    @staticmethod
+    def read_state(cookie: str) -> tuple[str, str, str]:
+        """The state cookie made by start(): (state, verifier, return_to). Older cookies are `state|return_to`."""
+        parts = cookie.split("|", 2)
+        if len(parts) == 3:
+            return parts[0], parts[1], parts[2]
+        return parts[0], "", parts[1] if len(parts) > 1 else ""
+
+    def exchange(self, state: str, code: str, verifier: str = "") -> dict | None:
+        """Swap the callback code for tokens: {access_token, refresh_token?, expires_at}. `verifier` is the one
+        from the state cookie; without it, the one this process remembers."""
         with self._lock:
             entry = self._pending.pop(state, None)
+        v, _, exp = verifier.rpartition(".")
+        if v and exp.isdigit() and int(exp) >= time.time():
+            entry = (v, int(exp))
         if not entry or entry[1] < time.time() or not code:
             return None
         return self._token_request({"grant_type": "authorization_code", "code": code,
@@ -204,8 +231,8 @@ class Login:
             tokens.setdefault("refresh_token", refresh_token)
         return tokens
 
-    def finish(self, state: str, code: str) -> str | None:
-        tokens = self.exchange(state, code)
+    def finish(self, state: str, code: str, verifier: str = "") -> str | None:
+        tokens = self.exchange(state, code, verifier)
         return tokens["access_token"] if tokens else None
 
     def _token_request(self, form: dict) -> dict | None:
@@ -303,15 +330,15 @@ def protect(app, *, settings: Settings | None = None, public_paths: tuple[str, .
             if not target.startswith("/") or target.startswith("//"):
                 target = base + "/"
             url, state = login.start(target)
+            name = Login.state_cookie(state.split("|", 1)[0])
             return await send_simple(send, 302, "", [("location", url),
-                                                     ("set-cookie", _cookie(STATE_COOKIE, state, base, LOGIN_TTL))])
+                                                     ("set-cookie", _cookie(name, state, base, LOGIN_TTL))])
         if rel == "/_dapp/callback":
-            raw_state = _cookies(headers).get(STATE_COOKIE, "")
-            state, _, back = raw_state.partition("|")
-            if not state or (query.get("state") or [""])[0] != state:
+            state, verifier, back = Login.find_state(_cookies(headers), (query.get("state") or [""])[0])
+            if not state or not hmac.compare_digest((query.get("state") or [""])[0], state):
                 return await send_simple(send, 400, PAGE.format(title="Sign-in failed",
                                          body=f"The sign-in state didn't match. <a href='{base}/_dapp/login'>Try again</a>."))
-            token = login.finish(state, (query.get("code") or [""])[0])
+            token = login.finish(state, (query.get("code") or [""])[0], verifier)
             ident = token and login.identify(token)
             if not ident:
                 return await send_simple(send, 401, PAGE.format(title="Sign-in failed",
@@ -319,6 +346,7 @@ def protect(app, *, settings: Settings | None = None, public_paths: tuple[str, .
             return await send_simple(send, 302, "", [
                 ("location", back or base + "/"),
                 ("set-cookie", _cookie(COOKIE, login.seal(ident), base, SESSION_TTL)),
+                ("set-cookie", _cookie(Login.state_cookie(state), "", base, 0)),
                 ("set-cookie", _cookie(STATE_COOKIE, "", base, 0))])
         if rel == "/_dapp/logout":
             return await send_simple(send, 302, "", [("location", base + "/"),
