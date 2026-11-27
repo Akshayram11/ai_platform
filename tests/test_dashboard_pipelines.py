@@ -56,7 +56,7 @@ def test_pipelines_tab_end_to_end(monkeypatch, tmp_path):
 
         c = signed_in_with_fakes(monkeypatch, platform_factory=platform, app_objects_factory=store)
         home = c.get("/pipelines")
-        assert home.status_code == 200 and "No pipeline yet" in home.text and 'class="on">Pipelines' in home.text
+        assert home.status_code == 200 and "No pipeline yet" in home.text and 'href="/pipelines" aria-current="page"' in home.text
         for needle in ("pgrds", "lake", "PostgreSQL", "DataOS Lakehouse", "Move from here", "never grants access by itself"):
             assert needle in home.text, needle
 

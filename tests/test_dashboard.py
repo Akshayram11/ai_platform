@@ -348,7 +348,7 @@ def test_every_page_loads_through_the_real_routes(monkeypatch):
     home = c.get("/")
     assert home.status_code == 200 and "Your apps" in home.text
     assert "1 person" in home.text and ">everyone<" in home.text and ">public<" in home.text   # Access column
-    assert "/storage" in home.text and 'class="on"' in home.text                              # nav, current page marked
+    assert "/storage" in home.text and 'aria-current="page"' in home.text                              # nav, current page marked
     for needle in ("<th title=\"DataOS secrets", ">Secrets<", ">Volumes<", "dapp-chatbot-llm", "dapp-chatbot-oidc", "dapp-dash-code",
                    "dash-data", "mounted at /data", "disk 2Gi", "none: files are lost on restart"):   # secrets and volumes, same table
         assert needle in home.text, needle
@@ -601,7 +601,7 @@ def test_models_tab_lists_deploys_customizes_and_deletes(monkeypatch):
     c = signed_in_with_fakes(monkeypatch, platform_factory=lambda s, t=None: fake)
 
     home = c.get("/models")
-    assert home.status_code == 200 and "Your models" in home.text and 'class="on"' in home.text
+    assert home.status_code == 200 and "Your models" in home.text and 'aria-current="page"' in home.text
     for needle in ("qwen-test", "gateway config", "Qwen2.5 0.5B Instruct", "Gemma 3 4B Instruct", "Your own GGUF model", "Deploy"):
         assert needle in home.text, needle
     assert "deployed as" in home.text and "bobs-model" in home.text
@@ -699,7 +699,7 @@ def test_claude_code_tab_deploy_token_stop_and_delete(monkeypatch):
     fake = FakePlatform()
     c = signed_in_with_fakes(monkeypatch, platform_factory=lambda s, t=None: fake)
     page = c.get("/claude")                                                  # nothing deployed yet: the deploy form
-    assert page.status_code == 200 and 'class="on"' in page.text and ">Claude Code<" in page.text
+    assert page.status_code == 200 and 'aria-current="page"' in page.text and ">Claude Code<" in page.text
     for needle in ("Deploy your Claude Code", "Deploy my Claude Code", "claude-alice", "Customize", "CPU request", "Memory limit", "Compute",
                    "Estimated running cost", 'id="e-day"', "claude setup-token", "Stay signed in to Claude", "Everyone's Claude Code",
                    "claude-bob", "only its owner can open it", "250m", "Stop</b> it when you're not using it"):
@@ -746,7 +746,7 @@ def test_the_nav_marks_the_current_section_with_or_without_the_root_path():
         page = TEMPLATES.env.from_string('{% extends "base.html" %}{% block body %}x{% endblock %}').render(
             request=Request(scope), s=type("S", (), {"user_id": "alice", "tenant": "t", "csrf": "t"})(), fqdn="x", flash=None, error=None)
         import re
-        return re.findall(r'<a href="[^"]*" class="on">([^<]+)</a>', page)
+        return re.findall(r'<a href="[^"]*" aria-current="page">.*?<span>([^<]+)</span></a>', page, re.DOTALL)
 
     for path in ("/dapp/claude", "/claude"):                       # the server may or may not put the root path in front
         assert on(path) == ["Claude Code"], path

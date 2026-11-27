@@ -24,7 +24,7 @@ def test_connect_supabase_from_the_dashboard(monkeypatch):
     assert page.status_code == 200 and "Supabase" in page.text and "None yet" in page.text
     new = c.get("/sources/new", params={"preset": "supabase"})
     assert new.status_code == 200 and '"postgresql"' in new.text and "Session pooler" in new.text
-    assert 'value="supabase"' in new.text and 'class="on"' in new.text
+    assert 'value="supabase"' in new.text and 'aria-current="page"' in new.text
     csrf = re.search(r'name="csrf" value="([^"]+)"', new.text).group(1)
 
     bad = c.post("/sources/new", data={"csrf": csrf, "preset": "supabase", "name": "Supa-Base", "url": URL})

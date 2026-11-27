@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+{% block title %}Agents · DataOS Apps{% endblock %}
+{% block body %}
+<link rel="stylesheet" href="{{ root }}/assets/agent.css">
+<header class="agent-head">
+  <div><h1>Agent Builder</h1><p>Configure an agent, try it, and publish it as a DataOS app.</p></div>
+  <div class="agent-select">
+    <label for="agent-picker">My agents</label>
+    <select id="agent-picker"><option value="">New agent</option></select>
+    <button id="new-agent" type="button">New agent</button>
+  </div>
+</header>
+<p id="notice" class="agent-notice" role="status"></p>
+<div class="agent-workspace">
+  <form class="agent-card agent-config" id="agent-config">
+    <div class="agent-toolbar"><h2>Configuration</h2><button type="button" id="log-template">Use Log Auditor template</button></div>
+    <label class="agent-field"><span>Agent name</span><input name="title" required maxlength="60" placeholder="Log Auditor"></label>
+    <label class="agent-field"><span>Model</span><select name="model" required><option value="">Loading models…</option></select></label>
+    <label class="agent-field"><span>System instructions</span><textarea name="instructions" required maxlength="12000" placeholder="Tell the agent what to do and what evidence to use."></textarea></label>
+    <fieldset class="agent-tools">
+      <legend>MCP servers</legend>
+      <div class="muted">Each selected server exposes its available functions to this agent.</div>
+      <div id="tool-options" class="agent-tools-list">Loading tools…</div>
+    </fieldset>
+    <div class="agent-toolbar">
+      <button type="submit">Save draft</button>
+      <button class="primary" type="button" id="publish-agent">Publish</button>
+    </div>
+  </form>
+  <section class="agent-card agent-chat" id="playground">
+    <header class="agent-toolbar"><div><h2>Playground</h2><p class="muted">Uses the configuration on this page.</p></div><button type="button" data-clear>New chat</button></header>
+    <div class="agent-conversation" role="log" aria-live="polite" data-placeholder="Try a question or task."></div>
+    <p class="agent-chat-status" role="status"></p>
+    <form class="agent-compose">
+      <input name="message" aria-label="Test message" placeholder="Message the agent…" required maxlength="12000">
+      <button class="primary" type="submit">Send</button>
+    </form>
+  </section>
+</div>
+<section class="agent-card agent-versions" id="versions" hidden>
+  <div class="agent-toolbar"><h2>Versions</h2><div class="row" id="app-links" hidden>
+    <a id="open-app" target="_blank" rel="noopener">Open app</a>
+    <a id="manage-app">Manage app</a>
+  </div></div>
+  <div class="muted" id="app-state"></div>
+  <div class="agent-version-list" role="region" aria-label="Version history" tabindex="0">
+  <table>
+    <thead><tr><th>Version</th><th>Created (UTC)</th><th>Deployment</th><th></th></tr></thead>
+    <tbody id="version-rows"></tbody>
+  </table>
+  </div>
+</section>
+<script src="{{ root }}/assets/agent-chat.js"></script>
+<script>
+(() => {
+  const root = {{ root|tojson }};
+  const csrf = {{ s.csrf|tojson }};
+  const find = (id) => document.getElementById(id);
+  const form = find("agent-config");
+  const picker = find("agent-picker");
+  const notice = find("notice");
+  const publishButton = find("publish-agent");
+  const saveButton = form.querySelector('button[type="submit"]');
+  let agent = null;
+  let options = {models: [], tools: [], agents: []};
+  let busy = false;
+  let selection = 0;
+
+  function tell(text, error = false) {
+    notice.textContent = text;
+    notice.dataset.error = String(error);
+  }
+
+  function api(path, method = "GET", data, signal) {
+    return agentJson(root + "/api/agents" + path, {
+      method, signal, headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf},
+      body: data === undefined ? undefined : JSON.stringify(data)
+    });
+  }
+
+  function config() {
+    if (!form.reportValidity()) throw new Error("Complete the agent configuration first.");
+    return {
+      title: form.elements.title.value.trim(), model: form.elements.model.value,
+      instructions: form.elements.instructions.value.trim(),
+      tools: [...form.querySelectorAll('input[name="tool"]:checked')].map(tool => tool.value),
+    };
+  }
+
+  const resetChat = setupAgentChat(find("playground"), (messages, signal) =>
+    api("/preview", "POST", {config: config(), messages}, signal));
+
+  function updateCatalog(draft) {
+    picker.replaceChildren(new Option("New agent", ""));
+    for (const item of options.agents) picker.add(new Option(item.title, item.id));
+    picker.value = agent?.id || "";
+
+    const models = options.models.slice();
+    if (draft.model && !models.includes(draft.model)) models.push(draft.model);
+    form.elements.model.replaceChildren(...models.map(model => new Option(model, model)));
+    form.elements.model.value = draft.model || (models.includes("gpt-6-luna") ? "gpt-6-luna" : models[0] || "");
+
+    const tools = options.tools.slice();
+    for (const name of draft.tools || []) {
+      if (!tools.some(tool => tool.name === name)) tools.push({name, description: "Access currently unavailable"});
+    }
+    const container = find("tool-options");
+    container.replaceChildren();
+    if (!tools.length) container.textContent = "No MCP servers available.";
+    for (const tool of tools) {
+      const label = document.createElement("label");
+      label.className = "agent-tool";
+      const check = document.createElement("input");
+      Object.assign(check, {type: "checkbox", name: "tool", value: tool.name, checked: (draft.tools || []).includes(tool.name)});
+      const caption = document.createElement("span");
+      caption.textContent = tool.name;
+      if (tool.description) {
+        const description = document.createElement("small");
+        description.textContent = tool.description;
+        caption.append(description);
+      }
+      label.append(check, caption);
+      container.append(label);
+    }
+  }
+
+  function showVersions() {
+    const visible = Boolean(agent?.versions?.length);
+    find("versions").hidden = !visible;
+    find("app-links").hidden = !agent?.applied;
+    find("app-state").textContent = agent?.applied ? "Last applied version " + agent.applied + ". Check Manage app for rollout status." : "";
+    if (agent?.applied) {
+      find("open-app").href = "/" + agent.app + "/";
+      find("manage-app").href = root + "/apps/" + agent.app;
+    }
+    const rows = find("version-rows");
+    rows.replaceChildren();
+    for (const version of agent?.versions || []) {
+      const row = rows.insertRow();
+      row.insertCell().textContent = "v" + version.version;
+      row.insertCell().textContent = version.created;
+      row.insertCell().textContent = version.version === agent.applied ? "Last applied" : "Saved";
+      const actions = row.insertCell();
+      if (version.version !== agent.applied) {
+        const button = document.createElement("button");
+        button.textContent = "Deploy this version";
+        button.disabled = busy;
+        button.onclick = () => run(() => publish(version.version));
+        actions.append(button);
+      }
+    }
+  }
+
+  function show(record) {
+    agent = record;
+    const draft = record?.draft || {};
+    form.elements.title.value = draft.title || "";
+    form.elements.instructions.value = draft.instructions || "";
+    updateCatalog(draft);
+    showVersions();
+  }
+
+  async function load() {
+    try {
+      options = await api("");
+      show(null);
+    } catch (error) {
+      tell(error.message, true);
+    }
+  }
+
+  async function select(id) {
+    if (busy) return;
+    const request = ++selection;
+    try {
+      const next = id ? await api("/" + id) : null;
+      if (request !== selection) return;
+      resetChat();
+      show(next);
+      tell("");
+    } catch (error) {
+      tell(error.message, true);
+    }
+  }
+
+  async function save() {
+    const draft = config();
+    agent = agent ? await api("/" + agent.id, "PUT", draft) : await api("", "POST", draft);
+    options.agents = [{id: agent.id, title: draft.title}, ...options.agents.filter(item => item.id !== agent.id)];
+    show(agent);
+  }
+
+  async function publish(version) {
+    if (!version) await save();
+    tell("Applying deployment…");
+    const result = await api("/" + agent.id + "/publish", "POST", {version});
+    agent = result.agent;
+    showVersions();
+    tell("Version " + agent.applied + " applied. " + (result.warnings || []).join(" "));
+  }
+
+  async function run(operation) {
+    if (busy) return;
+    selection++;
+    busy = true;
+    saveButton.disabled = publishButton.disabled = picker.disabled = find("new-agent").disabled = true;
+    showVersions();
+    try {
+      await operation();
+    } catch (error) {
+      tell(error.message, true);
+    } finally {
+      busy = false;
+      saveButton.disabled = publishButton.disabled = picker.disabled = find("new-agent").disabled = false;
+      showVersions();
+    }
+  }
+
+  picker.addEventListener("change", () => select(picker.value));
+  find("new-agent").addEventListener("click", () => select(""));
+  find("log-template").addEventListener("click", () => {
+    if (!form.elements.title.value) form.elements.title.value = "Log Auditor";
+    if (options.models.includes("gpt-6-luna")) form.elements.model.value = "gpt-6-luna";
+    form.elements.instructions.value = "Investigate DataOS logs for the requested resource and time range. Use dapp-monitor to verify evidence. Report the affected resource, likely cause, relevant log lines with timestamps when available, and the next check. State when the evidence is insufficient.";
+    const monitor = form.querySelector('input[value="dapp-monitor"]');
+    if (monitor) monitor.checked = true;
+    tell(monitor ? "Log Auditor template loaded." : "Log Auditor prompt loaded. This account has no dapp-monitor access.");
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    run(async () => { await save(); tell("Draft saved."); });
+  });
+  publishButton.addEventListener("click", () => run(() => publish(null)));
+  load();
+})();
+</script>
+{% endblock %}

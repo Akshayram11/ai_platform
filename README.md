@@ -11,19 +11,39 @@ with one small file, and everyone can see what they've deployed, what it uses, a
 
 ## Install on a laptop (and remove)
 
-You need `git`, `dataos-ctl` (logged in: `dataos-ctl login`, then `dataos-ctl tenant select`) and access to this repo.
-Nothing else: the installer brings `uv` and a private Python for `dapp`, and does not touch your system Python.
+You need `dataos-ctl` (logged in: `dataos-ctl login`, then `dataos-ctl tenant select`), or a DataOS API key for
+`dapp setup`. Nothing else: the installer brings `uv` and a private Python for `dapp`, and does not touch your system Python.
+
+One command (macOS or Linux; the repo is public, so no GitHub login is needed):
 
 ```bash
-git clone git@github.com:Akshayram11/ai_platform.git
-./ai_platform/install.sh          # installs dapp, then runs `dapp doctor`
+curl -fsSL https://raw.githubusercontent.com/Akshayram11/ai_platform/main/install.sh | bash
+```
+
+Or, with `git`:
+
+```bash
+git clone https://github.com/Akshayram11/ai_platform.git ~/ai_platform && ~/ai_platform/install.sh
+```
+
+Or, if you already have `uv`:
+
+```bash
+uv tool install --python 3.12 "git+https://github.com/Akshayram11/ai_platform.git"
+```
+
+Then:
+
+```bash
+dataos-ctl login                  # or: dapp setup   (saves a DataOS API key instead)
 dapp doctor                       # is this machine ready to deploy?
 dapp init mychat --template chatbot && dapp deploy      # a ready chatbot, nothing to build
 ```
 
 `install.sh` does not edit your shell files, log you in, or deploy anything. It prints the one `PATH` line to add if
 needed. Options: `--ref <branch|tag>`, `--mcp` (also register `dapp` with Claude Code), `--no-doctor`.
-Run it again to update (`git pull && ./install.sh`).
+Run it again to update (`git pull && ./install.sh`, or the same `curl … | bash`; with uv:
+`uv tool install --force --python 3.12 "git+https://github.com/Akshayram11/ai_platform.git"`).
 
 ```bash
 ./ai_platform/uninstall.sh        # asks first; --yes for scripts and agents

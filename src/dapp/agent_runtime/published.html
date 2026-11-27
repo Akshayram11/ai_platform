@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} · DataOS</title>
+<link rel="stylesheet" href="agent.css">
+</head>
+<body class="published-agent">
+<main>
+  <header class="agent-head">
+    <div><h1>{{ title }}</h1><p>{{ model }} · Version {{ version }}</p></div>
+  </header>
+  <section class="agent-card agent-chat" id="chat">
+    <header class="agent-toolbar"><h2>Chat</h2><button type="button" data-clear>New chat</button></header>
+    <div class="agent-conversation" role="log" aria-live="polite" data-placeholder="Send a message to the agent."></div>
+    <p class="agent-chat-status" role="status"></p>
+    <form class="agent-compose">
+      <input name="message" aria-label="Message" placeholder="Message the agent…" required maxlength="12000">
+      <button class="primary" type="submit">Send</button>
+    </form>
+  </section>
+</main>
+<script src="chat.js"></script>
+<script>
+setupAgentChat(document.getElementById("chat"), (messages, signal) =>
+  agentJson("api/chat", {method: "POST", headers: {"Content-Type": "application/json"},
+                        body: JSON.stringify({messages}), signal}));
+</script>
+</body>
+</html>

@@ -27,6 +27,23 @@ Open an object to:
 "Try it" on the Storage page saves a first value or file in one step. Read-only shares hide the write forms.
 The page talks to the gateway as you (your token), so you only see what immortal-obj allows you.
 
+## Agent Builder
+
+Open **Agents** to configure a model, system instructions, and the MCP servers your DataOS account can use.
+Use **Log Auditor** to start with Luna and `dapp-monitor`. The Playground tests the current form and lists the
+tool calls. It uses the dashboard gateway key for inference and your DataOS login for MCP calls.
+
+**Publish** saves an immutable configuration version and deploys a private app from source using the existing
+Python runtime. Drafts and versions are stored in the dashboard's `agent-builder` object in immortal-obj
+(`objects: true`). The generated app keeps its URL on updates and uses its own gateway key and tool grants.
+A tool owner may need to grant the new app access to a shared server. The builder shows that instruction when
+deployment reports a missing grant.
+
+Use **Deploy this version** to roll back to a saved configuration. **Manage app** opens the normal DataOS
+dashboard for rollout status, logs, access, and usage. The builder needs the LLM gateway and immortal-obj.
+The hosted model list comes from `DAPP_AGENT_MODELS` (defaults to `gpt-6-luna`), plus ready models from the
+gateway's DataOS registry. Set `DAPP_AGENT_COMPUTE` if the agent apps should run on a different compute.
+
 ## Access requests
 Someone without access opens a private app and gets the **No access** page, which now has **Request access**.
 That links to `/dapp/request-access?app=<app>`: sign in if needed, add an optional note (300 characters), send.
