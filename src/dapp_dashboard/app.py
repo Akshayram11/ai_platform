@@ -220,6 +220,8 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         client = DataOS(ctx)
         return Platform(client, writer=ApiWriter(client))
 
+    agent_hooks: dict[str, Any] = {}      # set by the Agent Builder: which of your agents use which tool
+
     def gateway_for(s: Session) -> GatewayUsage:
         if gateway_factory:
             return gateway_factory(s)
@@ -663,10 +665,14 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
                                                group_by="tool,tool_name"))
         back_to = request.query_params.get("return", "")
         names = {t["name"] for t in listed} if isinstance(listed, list) else set()
+        used_by = {}
+        if mine and agent_hooks.get("tool_users"):
+            found = _safe(lambda: agent_hooks["tool_users"](s))
+            used_by = found if isinstance(found, dict) and "error" not in found else {}
         return render(request, "tools.html", s, tools=listed, usage=usage, by_fn=by_fn, days=days,
                       gateway_url=gateway_public_url(Context("d", fqdn, s.tenant)),
                       presets=[p for p in tool_presets(fqdn) if p["name"] not in names],
-                      connect=request.query_params.get("connect", ""),
+                      connect=request.query_params.get("connect", ""), used_by=used_by,
                       adding=bool(request.query_params.get("add")) or (isinstance(listed, list) and not listed),
                       back_to=back_to if _local_path(back_to) else "", added=request.query_params.get("added", ""))
 
@@ -720,6 +726,14 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         return RedirectResponse(f"{request.scope.get('root_path', '')}{target}{sep}"
                                 + urlencode({"msg": f"{done['tool']}: connected as you", "connected": done["tool"]}),
                                 status_code=303)
+
+    @api.post("/tools/{name}/acts-as")
+    def tool_acts_as(request: Request, name: str, mode: str = Form("user"), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        say = {"owner": f"{name}: everyone allowed to use it now uses your account.",
+               "user": f"{name}: each person signs in with their own account again."}
+        return _act(request, "/tools", lambda: gateway_for(s).tool_act_as(s.tenant, name, mode), say.get(mode, name))
 
     @api.post("/tools/{name}/disconnect")
     def tool_disconnect(request: Request, name: str, csrf: str = Form("")):
@@ -1740,7 +1754,7 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         return back(request, path, msg=ok)
 
     mount_agents(api, need=need, check_csrf=check_csrf, render=render, gateway_for=gateway_for,
-                 platform_for=platform_for, app_objects_factory=app_objects_factory)
+                 platform_for=platform_for, app_objects_factory=app_objects_factory, hooks=agent_hooks)
     return api
 
 

@@ -230,6 +230,9 @@ class GatewayUsage:
         body = {"redirect_uri": redirect_uri, "client_id": client_id, "client_secret": client_secret, "scope": scope}
         return self._tool_call("POST", f"/admin/tools/{tenant}/{name}/oauth/setup", json=body)
 
+    def tool_act_as(self, tenant: str, name: str, mode: str) -> dict[str, Any]:
+        return self._tool_call("POST", f"/admin/tools/{tenant}/{name}/act-as", json={"mode": mode})
+
     def oauth_start(self, tenant: str, name: str, back: str = "") -> dict[str, Any]:
         return self._tool_call("POST", f"/admin/tools/{tenant}/{name}/oauth/start", json={"back": back})
 

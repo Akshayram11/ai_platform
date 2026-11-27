@@ -120,6 +120,22 @@
       Object.assign(check, {type: "checkbox", name: "tool", value: tool.name, checked: ticked.includes(tool.name)});
       const caption = document.createElement("span");
       caption.textContent = tool.name;
+      if (tool.auth_mode === "oauth") {
+        const badge = document.createElement("small");
+        badge.className = "agent-tool-auth";
+        badge.textContent = tool.act_as === "owner"
+          ? "Shared account of " + tool.owner + (tool.owner_connected ? "" : " · not connected right now")
+          : "Each person signs in" + (tool.connected ? " · you are connected" : " · you have not connected yet");
+        caption.append(badge);
+        if (tool.act_as !== "owner" && !tool.connected) {
+          const connect = document.createElement("a");
+          connect.href = root + "/tools?connect=" + encodeURIComponent(tool.name) + "&return=/agents";
+          connect.target = "_blank";
+          connect.rel = "opener";
+          connect.textContent = "Connect";
+          badge.append(" · ", connect);
+        }
+      }
       if (tool.description) {
         const description = document.createElement("small");
         description.textContent = tool.description;

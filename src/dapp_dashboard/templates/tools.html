@@ -81,6 +81,17 @@ dapp tool connect NAME              # add it to Claude Code</pre></div></div>
       <div class="muted">{{ t.description }}</div></div>
     {% if t.mine %}<span class="pill ok">yours</span>{% else %}<span class="pill">shared with you</span>{% endif %}
   </div>
+  {% if t.mine %}
+  {% set lc = t.last_call %}
+  <p class="muted tool-status" style="margin:8px 0 0">
+    {% if not lc %}<span class="pill">no calls yet</span> Nobody has called it through the gateway.
+    {% elif not lc.error %}<span class="pill ok">working</span> Last call went through{% else %}<span class="pill bad">failing</span> Its last call failed (HTTP {{ lc.status }}){% if lc.status in (401, 403) %}:
+      {% if t.auth_mode == 'oauth' %}someone's sign-in may have run out, or the server turned it down{% else %}the key may have expired or been revoked. Edit the tool and paste a new one{% endif %}{% endif %}{% endif %}
+    {% if lc %}<span title="{{ lc.ts }}">· {{ lc.ts[:16]|replace('T', ' ') }} UTC</span>{% endif %}
+    {% set agents = used_by.get(t.name) %}
+    {% if agents %}· used by your agents: {{ agents|join(', ') }}{% else %}· none of your agents use it{% endif %}
+  </p>
+  {% endif %}
   <p class="muted" style="margin:10px 0 4px">Use it in Claude Code:</p>
   <pre>dapp tool connect {{ t.name }}</pre>
   {% if t.auth_mode == 'oauth' %}
@@ -92,9 +103,20 @@ dapp tool connect NAME              # add it to Claude Code</pre></div></div>
     <form class="inline" method="post" action="{{ root }}/tools/{{ t.name }}/connect">
       <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="return" value="/tools">
       <button class="primary">Sign in to {{ t.name }}</button></form>{% endif %}
-    <span class="muted">Each person signs in with their own account: the tool sees who is asking, and agents never see the token.
+    <span class="muted">{% if t.act_as == 'owner' %}Everyone allowed to use it uses <b>{{ t.owner }}</b>'s account.{% else %}Each person signs in with their own account: the tool sees who is asking, and agents never see the token.{% endif %}
       {% if t.connected_users is defined %}{{ t.connected_users }} {{ 'person has' if t.connected_users == 1 else 'people have' }} connected.{% endif %}</span>
   </div>
+  {% if t.mine %}
+  <form method="post" action="{{ root }}/tools/{{ t.name }}/acts-as" class="tool-form acts-as" style="margin-top:10px">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}">
+    <fieldset class="tool-kinds"><legend>Whose account does it use?</legend>
+      <label><input type="radio" name="mode" value="user"{% if t.act_as != 'owner' %} checked{% endif %}> <b>Each person's own</b> <span class="muted">recommended: the tool's own permissions apply to the person asking</span></label>
+      <label><input type="radio" name="mode" value="owner"{% if t.act_as == 'owner' %} checked{% endif %}{% if not t.owner_connected %} disabled{% endif %}> <b>Everyone uses mine</b>
+        <span class="muted">for a shared tool, like a team workspace. Anyone allowed below can then read and change whatever <i>your</i> account can.{% if not t.owner_connected %} Connect it with your account first.{% endif %}</span></label>
+    </fieldset>
+    <div class="row"><button>Save</button></div>
+  </form>
+  {% endif %}
   {% else %}
   <form class="inline" method="post" action="{{ root }}/tools/{{ t.name }}/check" style="margin-top:8px">
     <input type="hidden" name="csrf" value="{{ s.csrf }}"><button>Check connection</button></form>

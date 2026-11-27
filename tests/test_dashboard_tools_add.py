@@ -55,6 +55,10 @@ class OAuthGateway(FakeGateway):
             raise GatewayError("this sign-in expired; connect again")
         return {"tool": "notion", "tenant": "engineering", "connected": True, "back": "/agents"}
 
+    def tool_act_as(self, tenant, name, mode):
+        OAuthGateway.calls.append(("act_as", tenant, name, mode))
+        return {"act_as": mode}
+
     def oauth_disconnect(self, tenant, name):
         OAuthGateway.calls.append(("disconnect", tenant, name))
         return {"disconnected": True}
@@ -63,7 +67,8 @@ class OAuthGateway(FakeGateway):
         return [*super().list_tools(tenant),
                 {"name": "notion", "owner": "alice", "mine": True, "has_auth": False, "description": "pages",
                  "url": "https://mcp.example.com/mcp", "allow": ["*"], "auth_mode": "oauth", "connected": False,
-                 "connected_users": 2, "endpoint": "/mcp/engineering/notion"}]
+                 "connected_users": 2, "endpoint": "/mcp/engineering/notion", "act_as": "user", "owner_connected": False,
+                 "last_call": None}]
 
 
 @pytest.fixture
@@ -170,3 +175,16 @@ def test_connect_callback_and_disconnect(c):
     assert "not completed: No" in query(declined)["err"]
     c.post("/tools/notion/disconnect", data={"csrf": token}, follow_redirects=False)
     assert OAuthGateway.calls[-1] == ("disconnect", "engineering", "notion")
+
+
+def test_the_owner_sees_status_agents_and_the_shared_account_switch(c):
+    html = c.get("/tools").text
+    assert "Whose account does it use?" in html and 'name="mode" value="owner"' in html
+    assert "Connect it with your account first" in html                              # owner_connected is not set here
+    token = csrf(html)
+    c.post("/tools/notion/acts-as", data={"mode": "owner", "csrf": token}, follow_redirects=False)
+    assert OAuthGateway.calls[-1] == ("act_as", "engineering", "notion", "owner")
+    r = c.post("/tools/notion/acts-as", data={"mode": "user", "csrf": token}, follow_redirects=False)
+    assert "own+account+again" in r.headers["location"] or "own%20account" in r.headers["location"]
+    assert c.post("/tools/notion/acts-as", data={"mode": "owner", "csrf": "nope"}, follow_redirects=False).status_code == 403
+    assert "none of your agents use it" in html and "working" in html or "no calls yet" in html

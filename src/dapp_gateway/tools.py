@@ -161,6 +161,10 @@ class OAuthSetup(BaseModel):
     scope: str | None = None         # None: what the server says it supports
 
 
+class ActAs(BaseModel):
+    mode: str                        # "user": each person's own account; "owner": everyone uses the owner's
+
+
 class OAuthStart(BaseModel):
     back: str = ""                   # a dashboard page to return to afterwards
 
@@ -175,9 +179,14 @@ def connect_url(name: str) -> str:
     return f"{base.rstrip('/')}/tools?connect={name}"
 
 
-def not_connected(t: Tool, person: str) -> JSONResponse:
+def not_connected(t: Tool, person: str, *, shared: bool = False) -> JSONResponse:
     """What a caller gets when the person hasn't signed in to an OAuth tool (or their sign-in ran out)."""
     link = connect_url(t.name)
+    if shared:                                         # everyone uses the owner's account, and it is not connected
+        return JSONResponse({"error": {"type": "tool_not_connected", "tool": t.name, "connect_url": link,
+                                       "message": f"{t.name} is shared through {t.owner}'s account, which is not "
+                                                  f"connected right now. Ask {t.owner} to connect it again: {link}"}},
+                            status_code=401)
     who = person or "the person using this app"
     return JSONResponse({"error": {"type": "tool_not_connected", "tool": t.name, "connect_url": link,
                                    "message": f"{who} has not connected {t.name}. Connect it once: {link}"}},
@@ -243,14 +252,20 @@ def mount_tools(api: FastAPI, *, store: Store, heimdall: Heimdall | None, caller
     @api.get("/admin/tools")
     def list_tools(tenant: str | None = None, ident: Identity = Depends(caller)) -> list[dict]:
         out = []
+        last: dict[str, dict] = {}
         for t in store.list_tools():
             if (tenant and t.tenant != tenant) or not may_use(t, ident.user_id):
                 continue
+            if t.tenant not in last:
+                last[t.tenant] = store.last_tool_calls(t.tenant)
             row = {**tool_view(t, full=ident.user_id in (t.owner, *admins)), "mine": t.owner == ident.user_id}
             if (t.auth_mode or "key") == "oauth":
                 row["connected"] = store.get_token(t.tenant, t.name, ident.user_id) is not None
+                row["owner_connected"] = store.get_token(t.tenant, t.name, t.owner) is not None
                 if row["mine"]:
                     row["connected_users"] = store.connected_users(t.tenant, t.name)
+            if row["mine"] or ident.user_id in admins:
+                row["last_call"] = last.get(t.tenant, {}).get(t.name)
             out.append(row)
         return out
 
@@ -346,6 +361,21 @@ def mount_tools(api: FastAPI, *, store: Store, heimdall: Heimdall | None, caller
         return {"tool": f"{tenant}/{name}", "auth_mode": "oauth", "needs_sign_in": True, "issuer": meta["issuer"],
                 "registered": not body.client_id}
 
+    @api.post("/admin/tools/{tenant}/{name}/act-as")
+    def set_act_as(tenant: str, name: str, body: ActAs, ident: Identity = Depends(caller)) -> dict[str, Any]:
+        """Whose account the tool uses. "owner" shares the owner's account with everyone allowed to use the tool, so
+        only the owner may choose it, and only after connecting their own account."""
+        t = find(tenant, name)
+        require_owner(t, ident)
+        if body.mode not in ("user", "owner"):
+            raise HTTPException(422, 'mode is "user" (each person signs in) or "owner" (everyone uses the owner\'s account)')
+        oauth_meta(t)
+        if body.mode == "owner" and store.get_token(tenant, name, t.owner) is None:
+            raise HTTPException(409, f"connect {name} with your own account first; the others will use it")
+        store.set_tool_act_as(tenant, name, body.mode)
+        log.info("tool %s/%s now acts as %s (by %s)", tenant, name, body.mode, ident.user_id)
+        return {"tool": f"{tenant}/{name}", "act_as": body.mode}
+
     @api.post("/admin/tools/{tenant}/{name}/oauth/start")
     def oauth_start(tenant: str, name: str, body: OAuthStart, ident: Identity = Depends(caller)) -> dict[str, Any]:
         """Where to send this person's browser to sign in. Anyone who may use the tool connects their own account."""
@@ -434,14 +464,16 @@ def mount_tools(api: FastAPI, *, store: Store, heimdall: Heimdall | None, caller
         if signed_in:
             # Each person's own sign-in. An app gets one only for the person it says it serves, and only when the
             # tool's owner allowed that app by name (app:* is not enough to borrow people's accounts).
-            if caller_id.startswith("app:") and caller_id not in allowed(t):
+            if (t.act_as or "user") == "user" and caller_id.startswith("app:") and caller_id not in allowed(t):
                 raise HTTPException(403, f"{caller_id} must be allowed by name to use {t.name} for its users; its "
                                          f"owner can run: dapp tool allow {t.name} {caller_id}")
             person = end_user if caller_id.startswith("app:") else caller_id
+            if (t.act_as or "user") == "owner":          # the owner shared their account: everyone allowed uses it
+                person = t.owner
             access = await run_in_threadpool(person_token, t, person) if person else None
             if access is None:
                 record(t, caller_id, end_user, reqs, 401, set(), time.monotonic(), failed=True)
-                return not_connected(t, person)
+                return not_connected(t, person, shared=(t.act_as or "user") == "owner")
             headers["Authorization"] = f"Bearer {access}"
         elif t.auth_header and t.auth_secret:
             headers[t.auth_header] = vault.open(t.auth_secret)

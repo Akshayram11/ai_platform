@@ -204,3 +204,39 @@ def test_pkce_pair():
     verifier, challenge = oauth.pkce()
     assert len(verifier) >= 43 and "=" not in challenge
     assert challenge == base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+
+
+def test_everyone_uses_the_owners_account_when_the_owner_shares_it(env):
+    c, server, _ = env
+    c.post("/admin/tools/ai/notion/oauth/setup", json={"redirect_uri": REDIRECT}, headers=ALICE)
+    act = "/admin/tools/ai/notion/act-as"
+    assert c.post(act, json={"mode": "owner"}, headers=ALICE).status_code == 409           # alice is not connected yet
+    connect(c, server, ALICE, "alice")
+    assert c.post(act, json={"mode": "owner"}, headers=BOB).status_code == 403              # only the owner chooses
+    assert c.post(act, json={"mode": "everyone"}, headers=ALICE).status_code == 422
+    assert c.post(act, json={"mode": "owner"}, headers=ALICE).json() == {"tool": "ai/notion", "act_as": "owner"}
+
+    assert rpc(c, BOB).json()["result"]["who"] == "alice"           # bob never signed in: the tool sees alice's account
+    assert server.mcp_seen[-1].headers["x-dapp-user"] == "bob"       # but the tool still learns who is asking
+    key = c.post("/admin/keys", json={"app": "agent-x", "tenant": "ai"}, headers=ALICE).json()["key"]
+    c.post("/admin/tools/ai/notion/access", json={"allow": ["app:*"]}, headers=ALICE)
+    assert rpc(c, {"authorization": f"Bearer {key}", "x-dapp-user": "carol"}).json()["result"]["who"] == "alice"
+    rows = {t["name"]: t for t in c.get("/admin/tools", headers=BOB).json()}
+    assert rows["notion"]["act_as"] == "owner" and rows["notion"]["owner_connected"] is True
+
+    c.delete("/admin/tools/ai/notion/oauth/me", headers=ALICE)         # alice signs out: the shared account is gone
+    r = rpc(c, BOB)
+    assert r.status_code == 401 and "shared through alice's account" in r.json()["error"]["message"]
+    assert c.post(act, json={"mode": "user"}, headers=ALICE).json()["act_as"] == "user"
+
+
+def test_the_owner_sees_how_the_tool_last_went(env):
+    c, server, _ = env
+    c.post("/admin/tools/ai/notion/oauth/setup", json={"redirect_uri": REDIRECT}, headers=ALICE)
+    row = lambda who: {t["name"]: t for t in c.get("/admin/tools", headers=who).json()}["notion"]
+    assert row(ALICE)["last_call"] is None and "last_call" not in row(BOB)          # only the owner sees it
+    rpc(c, BOB)                                                                      # not connected: a failed call
+    assert row(ALICE)["last_call"]["error"] is True and row(ALICE)["last_call"]["status"] == 401
+    connect(c, server, BOB, "bob")
+    rpc(c, BOB)
+    assert row(ALICE)["last_call"]["error"] is False

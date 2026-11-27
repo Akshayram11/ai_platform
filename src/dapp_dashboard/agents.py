@@ -65,6 +65,17 @@ class Registry:
         return [{"id": row["id"], "app": row["app"], "applied": row["applied"],
                  "title": json.loads(row["draft"])["title"]} for row in rows]
 
+    def tool_users(self, session) -> dict[str, list[str]]:
+        """Which of this person's agents use each tool (by the tools ticked in the draft)."""
+        out: dict[str, list[str]] = {}
+        rows = self.db.sql("select draft from agents where tenant = ? and owner = ? order by created desc, id",
+                           [session.tenant, session.user_id])
+        for row in rows:
+            draft = json.loads(row["draft"])
+            for tool in draft.get("tools", []):
+                out.setdefault(tool, []).append(draft.get("title", "agent"))
+        return out
+
     def get(self, session, agent_id):
         rows = self.db.sql("select id, app, draft, applied from agents where id = ? and tenant = ? and owner = ?",
                            [agent_id, session.tenant, session.user_id])
@@ -113,6 +124,24 @@ class Registry:
                     [version, agent_id, session.tenant, session.user_id])
 
 
+def sign_in_notes(tools: list[dict], chosen: list[str]) -> list[str]:
+    """What a person publishing should know about tools that ask people to sign in."""
+    by_name = {t["name"]: t for t in tools}
+    notes = []
+    for name in chosen:
+        t = by_name.get(name) or {}
+        if t.get("auth_mode") != "oauth":
+            continue
+        if t.get("act_as") == "owner":
+            if not t.get("owner_connected"):
+                notes.append(f"Tool {name} is shared through {t.get('owner')}'s account, which is not connected right "
+                             f"now: the agent will say so until {t.get('owner')} connects it on the Tools page.")
+        else:
+            notes.append(f"Tool {name} asks each person to sign in: whoever opens this agent is asked to connect "
+                         f"{name} the first time (a link appears in the chat).")
+    return notes
+
+
 def deploy_version(platform, session, agent, config: AgentConfig, version: int):
     live = platform.client.get_resource("app", agent["app"])
     if live:
@@ -143,7 +172,7 @@ def deploy_version(platform, session, agent, config: AgentConfig, version: int):
         return platform.deploy(spec)
 
 
-def mount_agents(api, *, need, check_csrf, render, gateway_for, platform_for, app_objects_factory):
+def mount_agents(api, *, need, check_csrf, render, gateway_for, platform_for, app_objects_factory, hooks=None):
     ready = False
     setup_lock = threading.Lock()
     # The dashboard runs a single replica. Serialize deployments so two tabs cannot race a rollback.
@@ -161,6 +190,9 @@ def mount_agents(api, *, need, check_csrf, render, gateway_for, platform_for, ap
                 ready = True
         return store
 
+    if hooks is not None:                       # the Tools page asks which agents use a tool
+        hooks["tool_users"] = lambda session: registry().tool_users(session)
+
     def catalog(session):
         gateway = gateway_for(session)
         hosted = sorted({m.strip() for m in os.environ.get("DAPP_AGENT_MODELS", "gpt-6-luna").split(",") if m.strip()})
@@ -172,7 +204,9 @@ def mount_agents(api, *, need, check_csrf, render, gateway_for, platform_for, ap
                      "description": m.get("description") or m.get("repo") or ""}
                     for m in sorted(local, key=lambda m: m["name"]) if m["name"] not in hosted]
         tools = [
-            {"name": t["name"], "description": t.get("description", "")}
+            {"name": t["name"], "description": t.get("description", ""), "auth_mode": t.get("auth_mode", "key"),
+             "act_as": t.get("act_as", ""), "connected": t.get("connected"), "owner": t.get("owner", ""),
+             "owner_connected": t.get("owner_connected")}
             for t in gateway.list_tools(session.tenant)
         ]
         return {"models": sorted(o["name"] for o in options if o["ready"]), "model_options": options,
@@ -298,6 +332,7 @@ def mount_agents(api, *, need, check_csrf, render, gateway_for, platform_for, ap
             warnings = [f"Tool {m[1]} is not allowed for this agent yet: its owner must add the app {m[2]} on the "
                         f"Tools page (Who can use it → Apps)." for line in result.get("notes", [])
                         if (m := re.match(r"tool (\S+): could not allow app:(\S+)", line))]
+            warnings += sign_in_notes(catalog(s)["tools"], config.tools)
             return {"agent": db.get(s, agent_id), "url": result["url"], "warnings": warnings}
         except (DataOSError, PlatformError, WriteError, GatewayError) as exc:
             log.warning("Agent deployment for %s failed: %s", agent_id, type(exc).__name__)

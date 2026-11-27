@@ -264,3 +264,13 @@ def test_a_tool_the_person_has_not_connected_says_where_to_connect():
         run_agent(config, chat, gateway="https://gateway.test", key="k", tenant="engineering", user="alice",
                   transport=httpx.MockTransport(respond))
     assert str(caught.value) == f"Connect notion first. alice has not connected notion. Connect it once: {link}"
+
+
+def test_publishing_says_what_sign_in_tools_mean():
+    from dapp_dashboard.agents import sign_in_notes
+    tools = [{"name": "notion", "auth_mode": "oauth", "act_as": "user"},
+             {"name": "team", "auth_mode": "oauth", "act_as": "owner", "owner": "rajat", "owner_connected": False},
+             {"name": "wiki", "auth_mode": "oauth", "act_as": "owner", "owner": "rajat", "owner_connected": True},
+             {"name": "jira", "auth_mode": "key"}]
+    notes = sign_in_notes(tools, ["notion", "team", "wiki", "jira"])
+    assert len(notes) == 2 and "asks each person to sign in" in notes[0] and "rajat's account, which is not connected" in notes[1]

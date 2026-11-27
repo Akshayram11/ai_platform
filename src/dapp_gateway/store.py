@@ -146,6 +146,9 @@ class Tool(Base):
     # themselves; `oauth` holds the server's endpoints and the gateway's client registration (encrypted JSON).
     auth_mode: Mapped[str] = mapped_column(String(16), default="key")
     oauth: Mapped[str] = mapped_column(Text, default="")
+    # Whose account an OAuth tool uses: "user" (default: each caller's own) or "owner" (everyone uses the owner's, for
+    # shared tools such as a team workspace). Set only by the tool's owner.
+    act_as: Mapped[str] = mapped_column(String(8), default="user")
 
 
 class ToolToken(Base):
@@ -216,6 +219,7 @@ def tool_view(t: Tool, *, full: bool) -> dict:
     """What callers may see of a tool. Never the credential; the allow list only for its owner/admins."""
     out = {"tenant": t.tenant, "name": t.name, "owner": t.owner, "description": t.description,
            "endpoint": f"/mcp/{t.tenant}/{t.name}", "has_auth": bool(t.auth_secret), "auth_mode": t.auth_mode or "key",
+           "act_as": (t.act_as or "user") if (t.auth_mode or "key") == "oauth" else "",
            "created": t.created.isoformat(), "updated": t.updated.isoformat()}
     if full:
         out.update(url=t.url, auth_header=t.auth_header, allow=json.loads(t.allow or "[]"))
@@ -243,6 +247,8 @@ class Store:
                 conn.execute(text("ALTER TABLE tools ADD COLUMN auth_mode VARCHAR(16) DEFAULT 'key'"))
             if "oauth" not in tool_cols:
                 conn.execute(text("ALTER TABLE tools ADD COLUMN oauth TEXT DEFAULT ''"))
+            if "act_as" not in tool_cols:
+                conn.execute(text("ALTER TABLE tools ADD COLUMN act_as VARCHAR(8) DEFAULT 'user'"))
 
     # ---- keys
     def issue_key(self, *, tenant: str, app: str, owner: str, rotate: bool) -> str:
@@ -448,6 +454,19 @@ class Store:
         with Session(self.engine) as s, s.begin():
             s.execute(update(Tool).where(Tool.tenant == tenant, Tool.name == name)
                       .values(auth_mode=mode, oauth=sealed, updated=now()))
+
+    def set_tool_act_as(self, tenant: str, name: str, mode: str) -> None:
+        with Session(self.engine) as s, s.begin():
+            s.execute(update(Tool).where(Tool.tenant == tenant, Tool.name == name).values(act_as=mode, updated=now()))
+
+    def last_tool_calls(self, tenant: str) -> dict[str, dict]:
+        """Per tool of the tenant: when it was last called through the gateway and how that went (status, error)."""
+        with Session(self.engine) as s:
+            latest = (select(ToolCall.tool, func.max(ToolCall.id).label("id")).where(ToolCall.tenant == tenant)
+                      .group_by(ToolCall.tool).subquery())
+            rows = s.execute(select(ToolCall).join(latest, ToolCall.id == latest.c.id)).scalars()
+            return {r.tool: {"ts": (r.ts if r.ts.tzinfo else r.ts.replace(tzinfo=UTC)).isoformat(),
+                             "status": r.status, "error": bool(r.error), "method": r.method} for r in rows}
 
     def get_token(self, tenant: str, tool: str, user: str) -> ToolToken | None:
         with Session(self.engine) as s:

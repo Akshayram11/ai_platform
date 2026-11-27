@@ -20,6 +20,7 @@
 .agent-tool { display: flex; gap: 9px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; }
 .agent-tool input { margin: 3px 0 0; align-self: start; accent-color: var(--primary); }
 .agent-tool small { display: block; color: var(--muted); overflow-wrap: anywhere; }
+.agent-tool .agent-tool-auth { color: var(--accent); }
 .agent-chat { display: grid; grid-template-rows: auto minmax(300px, 1fr) auto auto; gap: 12px; min-height: 490px; }
 .agent-conversation { display: grid; gap: 10px; align-content: start; max-height: 480px; overflow: auto; padding: 10px; border-radius: 8px; background: var(--bg); }
 .agent-conversation:empty::before { content: attr(data-placeholder); color: var(--muted); margin: auto; padding: 18px; text-align: center; }
