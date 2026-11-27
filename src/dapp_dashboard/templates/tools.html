@@ -6,10 +6,69 @@
 <p class="sub">MCP servers behind the gateway. Agents and apps call <code>{{ gateway_url }}/mcp/{{ s.tenant }}/&lt;tool&gt;</code>;
 the gateway checks who they are, adds the tool's own credential (nobody else ever sees it) and records every call.</p>
 
+{% if back_to %}
+<div class="panel tool-return"><div>{% if added %}<b>{{ added }}</b> is ready for your agent.{% else %}Add a tool, then go back to your agent.{% endif %}
+  It will be ticked there.</div>
+  <a class="button primary" id="back-to-agent" href="{{ root }}{{ back_to }}">Back to agent</a></div>
+<script>
+(() => {
+  const added = {{ added|tojson }};
+  try { if (added) localStorage.setItem("dapp-agent-new-tool", added); } catch {}
+  document.getElementById("back-to-agent").addEventListener("click", (event) => {
+    if (window.opener && !window.opener.closed) { event.preventDefault(); window.close(); }   // the Agents tab is still open
+  });
+})();
+</script>
+{% endif %}
+
+{% if not (tools is mapping and tools.error) %}
+<details class="panel" id="add-tool"{% if adding or back_to %} open{% endif %}>
+  <summary><b>+ Add tool</b> <span class="muted">· connect an MCP server once; agents and apps then just pick it</span></summary>
+  <form method="post" action="{{ root }}/tools/add" class="tool-form" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="return" value="{{ back_to }}">
+    <fieldset class="tool-kinds"><legend>What to connect</legend>
+      {% for p in presets %}
+      <label><input type="radio" name="kind" value="{{ p.name }}" data-url="{{ p.url }}" data-description="{{ p.description }}"
+        data-header="{{ p.auth_header }}" data-hint="{{ p.hint }}"> <b>{{ p.title }}</b> <span class="muted">{{ p.description }}</span></label>
+      {% endfor %}
+      <label><input type="radio" name="kind" value="" checked> <b>Custom MCP server</b> <span class="muted">any MCP server that speaks Streamable HTTP</span></label>
+      <p class="muted">dapp-monitor and immortal-obj come with the platform. MCP servers that need you to sign in (OAuth,
+        like Notion) come later; for now use one that takes a key or token.</p>
+    </fieldset>
+    <div class="tool-grid">
+      <label>Name<input name="name" required pattern="[a-z0-9][a-z0-9-]{0,47}" placeholder="jira" title="lower-case letters, digits and -"></label>
+      <label>MCP server URL<input name="url" required type="url" placeholder="https://mcp.example.com/mcp"></label>
+      <label class="wide">What it does<input name="description" maxlength="512" placeholder="Read and create Jira tickets"></label>
+      <label>Header<input name="auth_header" value="Authorization" placeholder="Authorization"></label>
+      <label>Key or token<input name="auth_value" type="password" placeholder="optional; a bare token is sent as Bearer"></label>
+    </div>
+    <p class="muted" id="tool-hint">The key is stored encrypted in the gateway. Nobody who uses the tool ever sees it, including agents.</p>
+    <label class="inline-check"><input type="checkbox" name="everyone" value="1"> Anyone signed in to DataOS may use it (otherwise only you, until you allow people or apps below)</label>
+    <div class="row"><button class="primary">Save and check</button></div>
+  </form>
+</details>
+<script>
+(() => {
+  const form = document.querySelector("#add-tool form");
+  if (!form) return;
+  const hint = document.getElementById("tool-hint"), plain = hint.textContent;
+  form.addEventListener("change", (event) => {
+    if (event.target.name !== "kind") return;
+    const preset = event.target.dataset;
+    form.elements.name.value = event.target.value;
+    form.elements.url.value = preset.url || "";
+    form.elements.description.value = preset.description || "";
+    form.elements.auth_header.value = preset.header || "Authorization";
+    hint.textContent = preset.hint || plain;
+  });
+})();
+</script>
+{% endif %}
+
 {% if tools is mapping and tools.error %}
 <div class="panel"><div class="muted">Gateway not reachable: {{ tools.error }}</div></div>
 {% elif not tools %}
-<div class="panel"><div class="empty">No tools you own or may use yet. Register one from your terminal:
+<div class="panel"><div class="empty">No tools you own or may use yet. Add one above, or from your terminal:
 <pre>dapp tool add NAME --url https://host/mcp --auth-env TOKEN_VAR -d "what it does"
 dapp tool allow NAME "*"            # every DataOS user
 dapp tool connect NAME              # add it to Claude Code</pre></div></div>
@@ -23,8 +82,23 @@ dapp tool connect NAME              # add it to Claude Code</pre></div></div>
   </div>
   <p class="muted" style="margin:10px 0 4px">Use it in Claude Code:</p>
   <pre>dapp tool connect {{ t.name }}</pre>
+  <form class="inline" method="post" action="{{ root }}/tools/{{ t.name }}/check" style="margin-top:8px">
+    <input type="hidden" name="csrf" value="{{ s.csrf }}"><button>Check connection</button></form>
   {% if t.mine %}
-  <p class="muted" style="margin:10px 0 4px">Upstream: <code>{{ t.url }}</code></p>
+  <p class="muted" style="margin:10px 0 4px">Upstream: <code>{{ t.url }}</code>{% if t.auth_header %} · key sent in <code>{{ t.auth_header }}</code>{% endif %}</p>
+  <details style="margin-top:8px"><summary class="muted">Edit URL, description or key</summary>
+    <form method="post" action="{{ root }}/tools/{{ t.name }}/edit" class="tool-form" autocomplete="off">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}">
+      <div class="tool-grid">
+        <label>MCP server URL<input name="url" required type="url" value="{{ t.url }}"></label>
+        <label class="wide">What it does<input name="description" maxlength="512" value="{{ t.description }}"></label>
+        <label>Header<input name="auth_header" value="{{ t.auth_header or 'Authorization' }}"></label>
+        <label>New key or token<input name="auth_value" type="password" placeholder="{{ 'empty keeps the stored one' if t.has_auth else 'optional' }}"></label>
+      </div>
+      {% if t.has_auth %}<label class="inline-check"><input type="checkbox" name="remove_credential" value="1"> Remove the stored key</label>{% endif %}
+      <div class="row"><button class="primary">Save and check</button></div>
+    </form>
+  </details>
   <h3 style="margin:14px 0 6px">Who can use it</h3>
   <table><tbody>
     <tr><td><code>{{ t.owner }}</code></td><td class="muted">owner, always</td><td></td></tr>

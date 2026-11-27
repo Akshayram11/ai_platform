@@ -23,7 +23,8 @@
     <label class="agent-field"><span>System instructions</span><textarea name="instructions" required maxlength="12000" placeholder="Tell the agent what to do and what evidence to use."></textarea></label>
     <fieldset class="agent-tools">
       <legend>MCP servers</legend>
-      <div class="muted">Each selected server exposes its available functions to this agent.</div>
+      <div class="agent-model-help"><span class="muted">Each selected server exposes its available functions to this agent.</span>
+        <a href="{{ root }}/tools?add=1&amp;return=/agents" target="_blank" rel="opener" id="add-tool">+ Add tool</a></div>
       <div id="tool-options" class="agent-tools-list">Loading tools…</div>
     </fieldset>
     <div class="agent-toolbar">
@@ -100,19 +101,22 @@
     picker.value = agent?.id || "";
 
     fillModels(draft.model);
+    drawTools(draft.tools || []);
+  }
 
+  function drawTools(ticked) {
     const tools = options.tools.slice();
-    for (const name of draft.tools || []) {
+    for (const name of ticked) {
       if (!tools.some(tool => tool.name === name)) tools.push({name, description: "Access currently unavailable"});
     }
     const container = find("tool-options");
     container.replaceChildren();
-    if (!tools.length) container.textContent = "No MCP servers available.";
+    if (!tools.length) container.textContent = "No MCP servers yet. Use + Add tool to connect one.";
     for (const tool of tools) {
       const label = document.createElement("label");
       label.className = "agent-tool";
       const check = document.createElement("input");
-      Object.assign(check, {type: "checkbox", name: "tool", value: tool.name, checked: (draft.tools || []).includes(tool.name)});
+      Object.assign(check, {type: "checkbox", name: "tool", value: tool.name, checked: ticked.includes(tool.name)});
       const caption = document.createElement("span");
       caption.textContent = tool.name;
       if (tool.description) {
@@ -176,6 +180,8 @@
     find("model-hint").textContent = text;
   }
 
+  // Models and tools again: a model that became ready, or a tool just added on the Tools page (+ Add tool hands
+  // its name over in localStorage, and it comes back ticked).
   async function refreshModels() {
     if (document.hidden) return;
     try {
@@ -183,6 +189,17 @@
       options.models = fresh.models;
       options.model_options = fresh.model_options;
       fillModels(form.elements.model.value);
+      if (fresh.tools) {
+        let added = "";
+        try { added = localStorage.getItem("dapp-agent-new-tool") || ""; localStorage.removeItem("dapp-agent-new-tool"); } catch {}
+        const ticked = [...form.querySelectorAll('input[name="tool"]:checked')].map(tool => tool.value);
+        options.tools = fresh.tools;
+        if (added && fresh.tools.some(tool => tool.name === added) && !ticked.includes(added)) {
+          ticked.push(added);
+          tell(added + " added and ticked. Save the draft to keep it.");
+        }
+        drawTools(ticked);
+      }
     } catch {}
   }
 
@@ -226,6 +243,7 @@
     try {
       options = await api("");
       show(null);
+      if (localStorage.getItem("dapp-agent-new-tool")) refreshModels();   // back from + Add tool in this tab
     } catch (error) {
       tell(error.message, true);
     }
@@ -258,7 +276,8 @@
     const result = await api("/" + agent.id + "/publish", "POST", {version});
     agent = result.agent;
     showVersions();
-    tell("Version " + agent.applied + " applied. " + (result.warnings || []).join(" "));
+    const warnings = result.warnings || [];
+    tell("Version " + agent.applied + " applied." + (warnings.length ? " " + warnings.join(" ") : ""), warnings.length > 0);
   }
 
   async function run(operation) {

@@ -35,8 +35,9 @@ def _messages(resp: httpx.Response) -> list[dict]:
 class Server:
     """One MCP server behind the gateway. A session is opened lazily and reopened if the server forgot it."""
 
-    def __init__(self, name: str, url: str, key: str, http: httpx.Client):
+    def __init__(self, name: str, url: str, key: str, http: httpx.Client, retry_seconds: float | None = None):
         self.name, self.url, self.key, self.http = name, url, key, http
+        self.retry_seconds = RETRY_SECONDS if retry_seconds is None else retry_seconds   # a quick check waits less
         self.session: str | None = None
         self.opened = False        # stateless servers send no session id: remember that we initialized anyway
         self.protocol = "2025-06-18"
@@ -54,7 +55,7 @@ class Server:
         if payload.get("method") == "tools/call":
             # An upstream error can arrive after a tool has changed state.
             return self.http.post(self.url, json=payload, headers=h)
-        deadline, delay = time.monotonic() + RETRY_SECONDS, 1.0
+        deadline, delay = time.monotonic() + self.retry_seconds, 1.0
         while True:
             try:
                 r = self.http.post(self.url, json=payload, headers=h)

@@ -64,7 +64,9 @@ def test_real_dashboard_routes_save_preview_publish_and_rollback(monkeypatch, tm
         shutil.copytree(spec.code, path)
         config = json.loads((path / "agent.json").read_text())
         deployed.append((spec.name, config))
-        return {"url": f"https://test.invalid/{spec.name}/", "notes": []}
+        note = (f"tool dapp-monitor: could not allow app:{spec.name} (gateway: not the owner (HTTP 403)); its owner "
+                f"must run `dapp tool allow dapp-monitor app:{spec.name}`")
+        return {"url": f"https://test.invalid/{spec.name}/", "notes": [note]}
 
     gateway = SimpleNamespace(
         list_models=lambda tenant: [{"name": "small", "ready": True}, {"name": "starting", "ready": False}],
@@ -125,6 +127,10 @@ def test_real_dashboard_routes_save_preview_publish_and_rollback(monkeypatch, tm
     assert response.status_code == 200, response.text
     first = response.json()
     assert first["agent"]["applied"] == 1
+    # someone else's tool: say plainly who has to allow the agent's app, and where
+    expected = (f"Tool dapp-monitor is not allowed for this agent yet: its owner must add the app "
+                f"{first['agent']['app']} on the Tools page (Who can use it → Apps).")
+    assert first["warnings"] == [expected]
     assert deployed[0] == (first["agent"]["app"], {"version": 1, "config": DRAFT})
 
     bundle = tmp_path / "publication-0"

@@ -263,8 +263,10 @@ def mount_agents(api, *, need, check_csrf, render, gateway_for, platform_for, ap
                 version = db.snapshot(agent_id, config)
             result = deploy_version(platform_for(s), s, agent, config, version)
             db.mark_applied(s, agent_id, version)
-            warnings = [line.rsplit(";", 1)[-1].strip() for line in result.get("notes", [])
-                        if "could not allow" in line]
+            # A tool someone else owns: the agent's app can't call it until that owner allows it.
+            warnings = [f"Tool {m[1]} is not allowed for this agent yet: its owner must add the app {m[2]} on the "
+                        f"Tools page (Who can use it → Apps)." for line in result.get("notes", [])
+                        if (m := re.match(r"tool (\S+): could not allow app:(\S+)", line))]
             return {"agent": db.get(s, agent_id), "url": result["url"], "warnings": warnings}
         except (DataOSError, PlatformError, WriteError, GatewayError) as exc:
             log.warning("Agent deployment for %s failed: %s", agent_id, type(exc).__name__)

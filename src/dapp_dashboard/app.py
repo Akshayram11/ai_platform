@@ -28,12 +28,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import SecretStr, ValidationError
 
+from dapp.agent_runtime.mcp_transport import Server, ToolError
 from dapp.auth import Heimdall, IdentityUnavailable, token_from_headers
 from dapp.claude import DEFAULTS as CLAUDE_DEFAULTS
 from dapp.claude import ClaudeDeploy, instance_name
@@ -660,8 +662,68 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
                                                group_by="tool,caller"))
             by_fn = _safe(lambda: g.tool_usage(tool=None, tenant=s.tenant, since_hours=days * 24,
                                                group_by="tool,tool_name"))
+        back_to = request.query_params.get("return", "")
+        names = {t["name"] for t in listed} if isinstance(listed, list) else set()
         return render(request, "tools.html", s, tools=listed, usage=usage, by_fn=by_fn, days=days,
-                      gateway_url=gateway_public_url(Context("d", fqdn, s.tenant)))
+                      gateway_url=gateway_public_url(Context("d", fqdn, s.tenant)),
+                      presets=[p for p in tool_presets(fqdn) if p["name"] not in names],
+                      adding=bool(request.query_params.get("add")) or (isinstance(listed, list) and not listed),
+                      back_to=back_to if _local_path(back_to) else "", added=request.query_params.get("added", ""))
+
+    def check_tool(s, name: str) -> str:
+        """Ask the tool, through the gateway and as the signed-in person, which functions it has."""
+        url = f"{gateway_internal_url()}/mcp/{s.tenant}/{name}"
+        try:
+            with httpx.Client(timeout=httpx.Timeout(20, connect=5)) as http:
+                listed = Server(name, url, s.token, http, retry_seconds=0).call("tools/list", {}, s.user_id)
+        except (ToolError, httpx.HTTPError, ValueError) as e:
+            return f"{name}: saved, but it did not answer through the gateway: {str(e)[:220]}"
+        fns = [f.get("name", "?") for f in listed.get("tools", [])]
+        shown = ", ".join(fns[:8]) + (f" and {len(fns) - 8} more" if len(fns) > 8 else "")
+        return f"{name}: connected · {len(fns)} tool{'' if len(fns) == 1 else 's'}" + (f": {shown}" if fns else "")
+
+    def _tool_saved(request: Request, name: str, note: str, back_to: str) -> RedirectResponse:
+        q = {"added": name, **({"return": back_to} if _local_path(back_to) else {})}
+        from urllib.parse import urlencode
+        good = ": connected" in note
+        return back(request, "/tools?" + urlencode(q), **({"msg": note} if good else {"err": note}))
+
+    @api.post("/tools/add")
+    def tool_add(request: Request, name: str = Form(""), url: str = Form(""), description: str = Form(""),
+                 auth_header: str = Form("Authorization"), auth_value: str = Form(""), everyone: str = Form(""),
+                 back_to: str = Form("", alias="return"), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        name, url = name.strip().lower(), url.strip()
+        if not name or not url:
+            return back(request, "/tools?add=1", err="A tool needs a name and the MCP server's URL")
+        try:
+            platform_for(s).save_tool(name, url=url, description=description.strip(), auth_header=auth_header.strip(),
+                                      auth_value=auth_value.strip() or None, allow=["*"] if everyone else None)
+        except (DataOSError, PlatformError, GatewayError, ValueError) as e:
+            return back(request, "/tools?add=1", err=str(e))
+        return _tool_saved(request, name, check_tool(s, name), back_to)
+
+    @api.post("/tools/{name}/edit")
+    def tool_edit(request: Request, name: str, url: str = Form(""), description: str = Form(""),
+                  auth_header: str = Form(""), auth_value: str = Form(""), remove_credential: str = Form(""),
+                  csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        value = "" if remove_credential else (auth_value.strip() or None)     # empty field: keep the stored one
+        try:
+            platform_for(s).save_tool(name, url=url.strip(), description=description.strip(),
+                                      auth_header=auth_header.strip(), auth_value=value)
+        except (DataOSError, PlatformError, GatewayError, ValueError) as e:
+            return back(request, "/tools", err=str(e))
+        return _tool_saved(request, name, check_tool(s, name), "")
+
+    @api.post("/tools/{name}/check")
+    def tool_check(request: Request, name: str, csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        note = check_tool(s, name).replace(": saved, but it", ": it")
+        return back(request, "/tools", **({"msg": note} if ": connected" in note else {"err": note}))
 
     @api.post("/tools/{name}/allow")
     def tool_allow(request: Request, name: str, users: str = Form(""), apps: str = Form(""),
@@ -1637,6 +1699,20 @@ def _safe(fn):
     except Exception as e:  # a missing metrics/gateway backend shouldn't break the page
         log.warning("dashboard backend call failed: %s", e)
         return {"error": str(e)}
+
+
+def _local_path(path: str) -> bool:
+    """A page of this dashboard to go back to (never another site)."""
+    return bool(path) and path.startswith("/") and not path.startswith("//") and "\\" not in path
+
+
+def tool_presets(fqdn: str) -> list[dict[str, str]]:
+    """MCP servers the Add tool form can fill in. dapp-monitor and immortal-obj come with the platform."""
+    return [{"name": "dataproduct-mcp", "title": "Data Product MCP", "url": f"https://{fqdn}/dataproduct-mcp/api/v1",
+             "description": "DataOS data products: search, semantic schema, run queries",
+             "auth_header": "Authorization",
+             "hint": "Your DataOS API key (Keys page). Everyone you allow uses the tool with this key, so they see what "
+                     "you can see."}]
 
 
 def main() -> None:
