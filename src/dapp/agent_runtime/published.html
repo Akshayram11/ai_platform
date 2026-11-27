@@ -55,7 +55,7 @@ button:disabled{opacity:.5;cursor:default}
 <main>
 <header>
   <span class="name"><button id="menu" type="button" title="Chats" aria-label="Chats">☰</button>
-    <div><b>{{ title }}</b><small>{{ model }} · Version {{ version }}</small></div></span>
+    <div><b>{{ title }}</b><small>{{ model }} · Version {{ version }}{% if traced %} · Conversations are recorded for this agent's owner{% endif %}</small></div></span>
   <small id="who"></small>
 </header>
 <div id="log" role="log" aria-live="polite"></div>

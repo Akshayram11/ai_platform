@@ -2,7 +2,7 @@
 
 The Agent Builder checkbox saves tracing with the draft and its published version. Playground turns use the checkbox immediately. Republish to apply it to an existing agent app. Rolling back restores the setting on the selected version.
 
-The shared agent runtime reports one trace per turn to the LLM gateway with the app's existing gateway key. The gateway sends OTLP/HTTP traces to MLflow. The dashboard authorizes the viewer before it asks the gateway to read them. **Traces** shows your Playground turns and the published agents you own. The trace app stores model identifiers, MCP server/function names, timings, status, and token counts when provided. It does not receive messages, prompts, model answers, tool arguments/results, or user credentials.
+The shared agent runtime reports one trace per turn to the LLM gateway with the app's existing gateway key. The gateway sends OTLP/HTTP traces to MLflow. The dashboard authorizes the viewer before it asks the gateway to read them. **Traces** shows your Playground turns and the published agents you own. Each trace holds the whole run: the question and the answer, the messages sent to the model on each call and its reply (including tool calls), each tool call's arguments and result, MCP server/function names, model and backend, timings, status, errors and token counts (per call and in total). Each input or output is cut at 8,000 characters. Credentials (gateway keys, DataOS tokens) are never recorded. A published agent with tracing on tells its users that conversations are recorded for the owner.
 
 ## Deploy in Poliks
 

@@ -384,3 +384,12 @@ a.button.primary{background:var(--primary);border-color:var(--primary);color:#ff
 @media (max-width:640px){.tool-grid{grid-template-columns:minmax(0,1fr)}}
 
 .oauth-row.oauth-focus{outline:2px solid var(--primary);outline-offset:6px;border-radius:8px}
+/* Traces: run totals, and each step's input and output */
+.trace-totals { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 12px 0; }
+.trace-totals div { min-width: 96px; }
+.trace-totals dt { color: var(--muted); font-size: 12px; }
+.trace-totals dd { margin: 0; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.trace-io td { padding-top: 0; border-top: 0; }
+.trace-io details { margin: 4px 0; }
+.trace-io summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+.trace-io pre { max-height: 360px; margin: 6px 0; }

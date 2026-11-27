@@ -49,12 +49,15 @@ def run_agent(config: AgentConfig, chat: Chat, *, gateway: str, key: str, tenant
               tool_token: str | None = None, transport: httpx.BaseTransport | None = None,
               version: int | None = None) -> dict:
     trace = AgentTrace(config.trace_enabled)
+    trace.input = chat.messages[-1].content
     error = None
     ok = False
     try:
         result = _run_agent(config, chat, gateway, key, tenant, user, tool_token, transport, trace)
+        trace.output = result["answer"]
         ok = True
     except AgentError as exc:
+        trace.output = f"Error: {exc}"
         error = exc
         raise
     finally:
@@ -85,6 +88,8 @@ def _run_agent(config, chat, gateway, key, tenant, user, tool_token, transport, 
             with trace.step("discover_tools", server=tool) as span:
                 try:
                     listed = server.call("tools/list", {}, user).get("tools", [])
+                    if span is not None:
+                        span["output"] = [fn.get("name") for fn in listed if isinstance(fn, dict)]
                 except ToolNotConnected as exc:
                     if span is not None:
                         span["error_type"] = "not_connected"
@@ -114,6 +119,8 @@ def _run_agent(config, chat, gateway, key, tenant, user, tool_token, transport, 
                 if config.model == "gpt-6-luna":
                     body["reasoning_effort"] = "none"  # Luna's Chat Completions tool-call mode
             with trace.step("chat") as span:
+                if span is not None:
+                    span["input"] = messages      # what the model saw: instructions, conversation, tool results
                 try:
                     response = http.post(f"{gateway.rstrip('/')}/openai/v1/chat/completions",
                                          json=body, headers=headers)
@@ -137,6 +144,9 @@ def _run_agent(config, chat, gateway, key, tenant, user, tool_token, transport, 
                                     span[attr] = value
                     message = payload["choices"][0]["message"]
                     calls = message.get("tool_calls") or []
+                    if span is not None:
+                        span["output"] = ({"content": message.get("content"), "tool_calls": calls} if calls
+                                          else message.get("content"))
                 except httpx.HTTPStatusError as exc:
                     if span is not None:
                         span["error_type"] = "gateway_error"
@@ -172,7 +182,9 @@ def _run_agent(config, chat, gateway, key, tenant, user, tool_token, transport, 
                                 function=function[:128] if target and re.fullmatch(r"[a-zA-Z0-9._:/-]+", function)
                                 else None) as span:
                     if span is not None:
-                        span.update(ok=False, error_type="unavailable")
+                        span.update(ok=False, error_type="unavailable",
+                                    input=fn.get("arguments") if target else {"requested": fn.get("name"),
+                                                                                "arguments": fn.get("arguments")})
                     if target:
                         try:
                             args = json.loads(fn["arguments"] or "{}")
@@ -193,6 +205,8 @@ def _run_agent(config, chat, gateway, key, tenant, user, tool_token, transport, 
                             result = "The tool could not be called with these arguments."
                             if span is not None:
                                 span["error_type"] = "tool_error"
+                    if span is not None:
+                        span["output"] = result
                 steps.append({"server": reported, "tool": function, "ok": ok})
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
     raise AgentError("This question exceeded the tool-call limit. Try a narrower question.")

@@ -39,12 +39,20 @@ def _otlp(report, scope, app):
             value["parentSpanId"] = parent
         return value
 
+    def total(field):
+        values = [getattr(step, field) for step in report.steps if getattr(step, field) is not None]
+        return sum(values) if values else None
+
+    tokens_in, tokens_out = total("input_tokens"), total("output_tokens")
     spans = [span("invoke_agent", report.start_ns, report.end_ns, report.ok, {
         "dapp.run_mode": scope, "dapp.app": app, "dapp.agent.version": report.version,
         "gen_ai.request.model": report.model,
+        "gen_ai.usage.input_tokens": tokens_in, "gen_ai.usage.output_tokens": tokens_out,
+        **_io(report.input, report.output),
     }, "AGENT")]
     for step in report.steps:
         attrs = {
+            **_io(step.input, step.output),
             "gen_ai.tool.name": step.function, "dapp.tool.server": step.server,
             "gen_ai.request.model": report.model if step.kind == "chat" else None,
             "gen_ai.response.model": step.response_model, "dapp.model.backend": step.backend,
@@ -56,12 +64,30 @@ def _otlp(report, scope, app):
     return {"resourceSpans": [{"scopeSpans": [{"scope": {"name": "dapp.agent"}, "spans": spans}]}]}
 
 
+def _io(inputs, outputs):
+    """MLflow shows a span's inputs and outputs from these two attributes (JSON values)."""
+    return {"mlflow.spanInputs": None if inputs is None else json.dumps(inputs),
+            "mlflow.spanOutputs": None if outputs is None else json.dumps(outputs)}
+
+
+def _text(value):
+    if value is None:
+        return None
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return value
+    return decoded if isinstance(decoded, str) else json.dumps(decoded, ensure_ascii=False)
+
+
 def _summary(info):
     return {
         "id": info["trace_id"],
         "started": info.get("request_time", ""),
         "duration": info.get("execution_duration", ""),
         "status": info.get("state", ""),
+        "question": _text(info.get("request_preview")),
+        "answer": _text(info.get("response_preview")),
     }
 
 
@@ -76,7 +102,16 @@ def _step(span):
             "backend": attrs.get("dapp.model.backend"), "server": attrs.get("dapp.tool.server"),
             "function": attrs.get("gen_ai.tool.name"), "version": attrs.get("dapp.agent.version"),
             "http_status": attrs.get("http.response.status_code"), "error": attrs.get("error.type"),
-            "input_tokens": attrs.get("gen_ai.usage.input_tokens"), "output_tokens": attrs.get("gen_ai.usage.output_tokens")}
+            "input_tokens": _int(attrs.get("gen_ai.usage.input_tokens")),
+            "output_tokens": _int(attrs.get("gen_ai.usage.output_tokens")),
+            "input": _text(attrs.get("mlflow.spanInputs")), "output": _text(attrs.get("mlflow.spanOutputs"))}
+
+
+def _int(value):
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class TraceStore:

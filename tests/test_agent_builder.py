@@ -182,6 +182,10 @@ def test_real_dashboard_routes_save_preview_publish_and_rollback(monkeypatch, tm
             "trace": {"id": trace_id, "started": "2026-11-27T00:00:00Z", "status": "OK", "steps": [
                 {"name": "chat", "model": "small", "actual_model": "qwen/small", "ok": True,
                  "duration_ms": 50, "backend": "local", "input_tokens": 12, "output_tokens": 4},
+                {"name": "execute_tool", "server": "dapp-monitor", "function": "search_logs", "ok": True,
+                 "duration_ms": 9, "input": '{"q": "error"}', "output": "<b>3 errors</b>"},
+                {"name": "chat", "model": "small", "ok": True, "duration_ms": 30, "input_tokens": 20,
+                 "output_tokens": 6},
             ]},
         })
 
@@ -191,6 +195,9 @@ def test_real_dashboard_routes_save_preview_publish_and_rollback(monkeypatch, tm
     assert trace_page.status_code == 200
     assert 'href="/dapp/traces" aria-current="page"' in trace_page.text
     assert "small → qwen/small" in trace_page.text and "Self-hosted" in trace_page.text
+    assert "<dd>32</dd>" in trace_page.text and "<dd>10</dd>" in trace_page.text and "<dd>42</dd>" in trace_page.text
+    assert '"q": "error"' in trace_page.text.replace("&#34;", '"')      # tool arguments, indented
+    assert "&lt;b&gt;3 errors&lt;/b&gt;" in trace_page.text            # tool results are escaped
     assert TestClient(app, base_url="https://testserver", root_path="/dapp",
                       headers={"Authorization": "Bearer bob-token"}).get(trace_url).status_code == 404
 
@@ -263,8 +270,15 @@ def test_engine_calls_only_selected_tools_and_reports_its_steps(trace_enabled):
         ]
         assert report["steps"][2]["function"] == "search_logs"
         assert report["steps"][3]["error_type"] == "unavailable"
-        for private in ("Check logs", "ERROR upstream unavailable", "delete_app", "dataos-login"):
-            assert private not in json.dumps(report)
+        assert report["input"] == "Check logs"
+        assert report["output"] == "The upstream service was unavailable."
+        assert report["steps"][0]["output"] == '["search_logs"]'
+        assert "Check logs" in report["steps"][1]["input"] and "tool_calls" in report["steps"][1]["output"]
+        assert report["steps"][2]["input"] == "{}" and "ERROR upstream unavailable" in report["steps"][2]["output"]
+        assert "delete_app" in report["steps"][3]["input"]
+        assert report["steps"][4]["output"] == "The upstream service was unavailable."
+        for secret in ("dataos-login", "app-key"):              # credentials are never recorded
+            assert secret not in json.dumps(report)
     else:
         assert not reports and "trace_id" not in result
 

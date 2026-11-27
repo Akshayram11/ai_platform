@@ -220,6 +220,17 @@ TEMPLATES.env.filters["when"] = fmt_when
 TEMPLATES.env.filters["tokens"] = show_tokens
 
 
+def fmt_pretty(text: str) -> str:
+    """JSON in a trace (messages, tool arguments and results) indented for reading; anything else as it is."""
+    try:
+        return json.dumps(json.loads(text), indent=2, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return text
+
+
+TEMPLATES.env.filters["pretty"] = fmt_pretty
+
+
 def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, platform_factory=None,
                gateway_factory=None, prom_factory=None, objects_factory=None, app_objects_factory=None) -> FastAPI:
     """The *_factory arguments let tests put fakes behind the real routes; production leaves them out."""

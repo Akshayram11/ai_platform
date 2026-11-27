@@ -47,5 +47,5 @@ spec:
             templateType: none
             template: '{"gpt-6-luna": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125}, "gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075}}'
   stackSpec:
-    image: docker.io/tmdcio/dataos-apps:0.1.50
+    image: docker.io/tmdcio/dataos-apps:0.1.53
     command: [dapp-gateway]

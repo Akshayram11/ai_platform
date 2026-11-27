@@ -28,7 +28,7 @@ def viewer(request: Request) -> str:
 def page(request: Request) -> str:
     viewer(request)
     return templates.get_template("published.html").render(title=config.title, model=config.model,
-                                                            version=record["version"])
+                                                            version=record["version"], traced=config.trace_enabled)
 
 
 @app.get("/chat.js")
