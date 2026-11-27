@@ -10,9 +10,8 @@
 # The gateway must list `dapp-monitor` in DAPP_TOOL_INTERNAL_HOSTS (deploy/gateway.dapp.yaml).
 name: dapp-monitor
 description: MCP tool to watch DataOS apps (status, recent and stored logs, error counts), read-only, behind the dapp gateway
-runtime: python-3.12
-code: ./app
-run: python server.py
+image: docker.io/tmdcio/dapp-dapp-monitor:0.1.0     # code + mcp baked in (apps/mcp-tool.Dockerfile): nothing to download at start
+command: [python, /app/server.py]
 compute: engineering-compute
 hostname: dapp-monitor           # the gateway reaches it in-cluster at http://dapp-monitor:8080/mcp
 path: /dapp-monitor

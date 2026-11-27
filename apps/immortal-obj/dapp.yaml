@@ -10,9 +10,8 @@
 #   dapp tool allow immortal-obj "*" "app:*"       # everyone and every app; each sees only its own objects
 name: immortal-obj
 description: Durable objects (key-value + SQLite) for agents and apps, on a DataOS Volume
-runtime: python-3.12
-code: ./app
-run: python server.py
+image: docker.io/tmdcio/dapp-immortal-obj:0.1.0     # code + mcp baked in (apps/mcp-tool.Dockerfile): nothing to download at start
+command: [python, /app/server.py]
 compute: engineering-compute
 hostname: immortal-obj          # the gateway reaches it in-cluster at http://immortal-obj:8080/mcp
 path: /immortal-obj
