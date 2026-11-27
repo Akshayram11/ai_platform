@@ -3,31 +3,58 @@
 <span class="pill {{ {'running':'ok','failed':'bad'}.get(a.state, 'warn') }}" title="{{ a.runtime or a.status }}">{{ a.state }}</span>
 {%- endmacro %}
 {% block body %}
-<h1>{{ 'All apps in ' ~ s.tenant if all else 'Your apps' }}</h1>
-<p class="sub">
-  {% if all %}<a href="?">Show only mine</a>{% else %}<a href="?all=true">Show every app in {{ s.tenant }}</a>{% endif %}
-  · deploy with <code>dapp deploy</code>
-</p>
+<section class="apps-intro" aria-labelledby="apps-heading">
+  <div class="apps-intro-copy">
+    <h1 id="apps-heading">{{ 'All apps in ' ~ s.tenant if all else 'Your apps' }}</h1>
+    <p>Manage deployments, access, compute and LLM usage in {{ s.tenant }}.</p>
+    <div class="deploy-command" title="Deploy from your terminal">
+      <span aria-hidden="true">$</span><code>dapp deploy</code>
+    </div>
+  </div>
+  <nav class="quick-actions" aria-label="Quick actions">
+    <a href="{{ root }}/claude">{{ icon('claude') }}<span>Claude Code</span>{{ icon('arrow') }}</a>
+    <a href="{{ root }}/models">{{ icon('models') }}<span>Browse models</span>{{ icon('arrow') }}</a>
+    <a href="{{ root }}/pipelines/new">{{ icon('pipelines') }}<span>New pipeline</span>{{ icon('arrow') }}</a>
+  </nav>
+</section>
 
-<div class="kpis">
+<section class="apps-metrics" aria-label="App metrics">
   <div class="kpi"><div class="label">Apps</div><div class="value">{{ apps|length }}</div></div>
   {% set running = apps|selectattr('state','equalto','running')|list|length %}
-  <div class="kpi"><div class="label">Running</div><div class="value">{{ running }}</div></div>
+  <div class="kpi"><div class="label"><span class="running-dot" aria-hidden="true"></span>Running</div><div class="value">{{ running }}</div></div>
+  {% if services %}<div class="kpi"><div class="label">Services</div><div class="value">{{ services|length }}</div></div>{% endif %}
   {% set pend = waiting or {} %}
   {% if pend %}<div class="kpi"><div class="label">Access requests</div><div class="value">{{ pend.values()|sum }}</div>
-    <div class="muted" style="font-size:12px">waiting for you</div></div>{% endif %}
+    <div class="muted">waiting for you</div></div>{% endif %}
   {% if llm and not llm.error %}
   <div class="kpi"><div class="label">LLM tokens · 30 days</div><div class="value">{{ (llm.total.input_tokens + llm.total.output_tokens)|num }}</div></div>
   <div class="kpi"><div class="label">LLM cost · 30 days</div><div class="value">{{ ('$%.4f' if llm.total.cost_usd < 1 else '$%.2f')|format(llm.total.cost_usd) if llm.total.cost_usd is not none else '–' }}</div></div>
   {% else %}
   <div class="kpi"><div class="label">LLM usage</div><div class="value muted" style="font-size:13px">gateway not reachable</div></div>
   {% endif %}
-</div>
+</section>
 
 {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
-<div class="panel">
+<section class="inventory panel" aria-labelledby="inventory-title">
+  <div class="inventory-bar">
+    <h2 class="inventory-title" id="inventory-title">App inventory</h2>
+    <div class="inventory-actions">
+      {% if apps %}
+      <div class="app-search" id="app-search" hidden>
+        {{ icon('search') }}
+        <label class="visually-hidden" for="app-filter">Filter apps by name or owner</label>
+        <input id="app-filter" type="search" placeholder="Filter apps…" autocomplete="off" aria-controls="apps-table">
+      </div>
+      {% endif %}
+      <nav class="scope-toggle" aria-label="App scope">
+        <a href="?"{% if not all %} aria-current="true"{% endif %}>My apps</a>
+        <a href="?all=true"{% if all %} aria-current="true"{% endif %} title="Show every app in {{ s.tenant }}">All apps</a>
+      </nav>
+    </div>
+  </div>
 {% if apps %}
-<table>
+<div class="table-scroll" role="region" aria-label="Scrollable app inventory" tabindex="0">
+<table class="apps-table" id="apps-table" aria-labelledby="inventory-title">
   <thead><tr><th>App</th><th>Status</th><th>Owner</th><th>Access</th>
     {% if has_prom %}<th class="num">CPU (cores)</th><th class="num">Memory</th>{% endif %}
     <th title="DataOS secrets mounted as environment variables (names only; values are never shown)">Secrets</th>
@@ -36,23 +63,77 @@
   <tbody>
   {% for a in apps %}
   {% set c = compute.get(a.name) or {} %}{% set u = by_app.get(a.name) %}
-  <tr>
-    <td><a href="{{ request.scope.root_path }}/apps/{{ a.name }}">{{ a.name }}</a>{% if not a.managed_by_dapp %} <span class="muted">(not via dapp)</span>{% endif %}</td>
+  <tr data-app="{{ a.name }}" data-owner="{{ a.owner or '' }}">
+    <td class="app-name"><a href="{{ request.scope.root_path }}/apps/{{ a.name }}">{{ a.name }}</a>{% if not a.managed_by_dapp %} <span class="muted">(not via dapp)</span>{% endif %}</td>
     <td>{{ status_pill(a) }}{% if a.error %}<div class="muted" style="font-size:12px">{{ a.error[:120] }}</div>{% endif %}</td>
-    <td>{{ a.owner }}</td>
+    <td class="app-owner">{{ a.owner }}</td>
     {% set ac = a.access %}
-    <td style="white-space:nowrap">{% if ac %}{% if ac.mode == 'login' %}{% if ac.everyone %}<span class="pill warn" title="Anyone signed in to DataOS can open it">everyone</span>{% else %}{{ ac.people }} {{ 'person' if ac.people == 1 else 'people' }}{% if ac.roles %} + {{ ac.roles }} {{ 'role' if ac.roles == 1 else 'roles' }}{% endif %}{% endif %}{% elif ac.mode == 'public' %}<span class="pill warn" title="No sign-in in front of the app">public</span>{% else %}<span class="muted">DataOS policy</span>{% endif %} · {% endif %}<a href="{{ request.scope.root_path }}/apps/{{ a.name }}?tab=access">Manage</a>{% if pend.get(a.name) %} <a class="pill warn" href="{{ request.scope.root_path }}/apps/{{ a.name }}?tab=access" title="Waiting for your answer">{{ pend[a.name] }} request{{ 's' if pend[a.name] > 1 }}</a>{% endif %}</td>
+    <td class="app-access">{% if ac %}{% if ac.mode == 'login' %}{% if ac.everyone %}<span class="pill warn" title="Anyone signed in to DataOS can open it">everyone</span>{% else %}{{ ac.people }} {{ 'person' if ac.people == 1 else 'people' }}{% if ac.roles %} + {{ ac.roles }} {{ 'role' if ac.roles == 1 else 'roles' }}{% endif %}{% endif %}{% elif ac.mode == 'public' %}<span class="pill warn" title="No sign-in in front of the app">public</span>{% else %}<span class="muted">DataOS policy</span>{% endif %} · {% endif %}<a href="{{ request.scope.root_path }}/apps/{{ a.name }}?tab=access">Manage</a>{% if pend.get(a.name) %} <a class="pill warn" href="{{ request.scope.root_path }}/apps/{{ a.name }}?tab=access" title="Waiting for your answer">{{ pend[a.name] }} request{{ 's' if pend[a.name] > 1 }}</a>{% endif %}</td>
     {% if has_prom %}<td class="num">{{ c.cpu_cores|num(3) if c and not c.error else '–' }}</td><td class="num">{{ c.memory_bytes|bytes if c and not c.error else '–' }}</td>{% endif %}
     <td style="max-width:240px">{% for x in a.secrets or [] %}<a href="{{ request.scope.root_path }}/apps/{{ a.name }}?tab=secrets" class="chip" style="margin:1px 2px 1px 0;text-decoration:none" title="{{ x }}">{{ x|truncate(28, true, '…') }}</a>{% else %}<span class="muted">–</span>{% endfor %}</td>
     <td>{% for v in a.volumes or [] %}<span class="chip" style="margin:1px 2px 1px 0" title="mounted at {{ v.directory }}{{ ' (read-only)' if v.readOnly }}">{{ v.id }} <span class="muted">{{ v.directory }}</span></span>{% endfor %}{% if a.disk %}<span class="chip" title="a disk that belongs to this app and goes with it">disk {{ a.disk }}</span>{% endif %}{% if not a.volumes and not a.disk %}<span class="muted">none: files are lost on restart</span>{% endif %}</td>
     <td class="num">{{ (u.input_tokens + u.output_tokens)|num if u else '–' }}</td>
-    <td>{% if a.url %}<a href="{{ a.url }}" target="_blank" rel="noopener">open</a>{% endif %}</td>
+    <td>{% if a.url %}<a href="{{ a.url }}" class="app-open" target="_blank" rel="noopener" aria-label="Open {{ a.name }}">Open {{ icon('external') }}</a>{% endif %}</td>
   </tr>
   {% endfor %}
+  <tr id="app-filter-empty" hidden><td class="empty" colspan="{{ 10 if has_prom else 8 }}">No apps match your filter.</td></tr>
   </tbody>
 </table>
-{% else %}
-<div class="empty">No apps yet. Try <code>dapp init hello &amp;&amp; dapp deploy</code>.</div>
-{% endif %}
 </div>
+<p class="visually-hidden" id="app-filter-status" role="status"></p>
+{% else %}
+<div class="empty empty-outline">No apps yet. Try <code>dapp init hello &amp;&amp; dapp deploy</code>.</div>
+{% endif %}
+</section>
+{% if services %}
+<section class="inventory panel" aria-labelledby="services-title">
+  <div class="inventory-bar">
+    <h2 class="inventory-title" id="services-title">Services</h2>
+    <p class="muted" style="margin:0;font-size:12px">DataOS Services applied on their own (an app's own service shows on the app). Apps reach one at <code>http://&lt;name&gt;:&lt;port&gt;</code> inside DataOS.</p>
+  </div>
+  <div class="table-scroll" role="region" aria-label="Scrollable services" tabindex="0">
+  <table class="apps-table" id="services-table" aria-labelledby="services-title">
+    <thead><tr><th>Service</th><th>Status</th><th>Owner</th><th>Address inside DataOS</th><th>Ports</th><th>Description</th></tr></thead>
+    <tbody>
+    {% for x in services %}
+    <tr data-service="{{ x.name }}">
+      <td class="app-name">{{ x.name }}</td>
+      <td>{{ status_pill(x) }}{% if x.error %}<div class="muted" style="font-size:12px">{{ x.error[:120] }}</div>{% endif %}</td>
+      <td class="app-owner">{{ x.owner }}</td>
+      <td><code>{{ x.address or '–' }}</code></td>
+      <td>{% for p in x.ports %}<span class="chip" style="margin:1px 2px 1px 0">{{ p }}</span>{% else %}<span class="muted">–</span>{% endfor %}</td>
+      <td class="muted">{{ x.description or '–' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+{% if apps %}
+<script>
+  (() => {
+    const search = document.getElementById('app-search');
+    const input = document.getElementById('app-filter');
+    const rows = document.querySelectorAll('#apps-table [data-app]');
+    const empty = document.getElementById('app-filter-empty');
+    const status = document.getElementById('app-filter-status');
+    const filterApps = () => {
+      const query = input.value.trim().toLowerCase();
+      let count = 0;
+      rows.forEach((row) => {
+        const matches = row.dataset.app.toLowerCase().includes(query)
+          || row.dataset.owner.toLowerCase().includes(query);
+        row.hidden = !matches;
+        if (matches) count += 1;
+      });
+      empty.hidden = count !== 0;
+      status.textContent = query ? `${count} of ${rows.length} apps match` : '';
+    };
+    input.addEventListener('input', filterApps);
+    filterApps();
+    search.hidden = false;
+  })();
+</script>
+{% endif %}
 {% endblock %}

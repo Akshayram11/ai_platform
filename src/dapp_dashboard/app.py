@@ -81,6 +81,8 @@ from dapp_login import SCOPES, Login, Settings
 from dapp_objects import Client as ObjectsClient
 from dapp_objects import ObjectsError
 
+from .agents import mount_agents
+
 log = logging.getLogger("dapp.dashboard")
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 SESSION_COOKIE = "dapp_session"
@@ -378,8 +380,10 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
                     compute[a["name"]] = res
         waiting = _safe(lambda: pending_counts([a["name"] for a in apps if a.get("owner") == s.user_id]))
         waiting = {k: v for k, v in waiting.items() if isinstance(v, int)} if isinstance(waiting, dict) else {}
+        services = _safe(lambda: p.list_services(everyone=all))
+        services = services if isinstance(services, list) else []
         return render(request, "index.html", s, apps=apps, err=err, all=all, llm=llm, by_app=by_app,
-                      compute=compute, has_prom=bool(prom_url), waiting=waiting)
+                      compute=compute, has_prom=bool(prom_url), waiting=waiting, services=services)
 
     @api.get("/apps/{name}", response_class=HTMLResponse)
     def app_page(request: Request, name: str, tab: str = "overview", days: int = 30):
@@ -1622,6 +1626,8 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
             return back(request, path, err=str(e))
         return back(request, path, msg=ok)
 
+    mount_agents(api, need=need, check_csrf=check_csrf, render=render, gateway_for=gateway_for,
+                 platform_for=platform_for, app_objects_factory=app_objects_factory)
     return api
 
 

@@ -2,7 +2,7 @@
 name: dapp
 title: DataOS Apps
 description: See what you've deployed on DataOS, its compute and LLM usage, secrets and access
-image: docker.io/tmdcio/dataos-apps:0.1.37
+image: docker.io/tmdcio/dataos-apps:0.1.38
 command: [dapp-dashboard]
 port: 8080
 compute: engineering-compute

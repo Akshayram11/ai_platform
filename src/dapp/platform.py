@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import json
 import logging
 import os
 import re
@@ -200,6 +201,23 @@ class Platform:
         owner = None if everyone else self.ctx.user_id
         apps = self.client.list_resources("app", owner=owner, details=with_access)
         return [self._summarize(a) for a in apps]
+
+    def list_services(self, *, everyone: bool = False) -> list[dict[str, Any]]:
+        """DataOS Services (type `service`) that were applied on their own. An app's generated service is a sub-resource
+        and is not listed here: it shows on the app. Read-only: dapp doesn't deploy or change these."""
+        owner = None if everyone else self.ctx.user_id
+        out = []
+        for s in self.client.list_resources("service", owner=owner):
+            status, runtime, error = s.get("status"), s.get("runtime"), s.get("error") or s.get("runtimeError")
+            props = s.get("activeProperties") or {}
+            try:
+                ports = [p.get("port") for p in json.loads(props.get("servicePorts") or "[]") if isinstance(p, dict)]
+            except ValueError:
+                ports = []
+            out.append({"name": s.get("name"), "owner": s.get("owner"), "description": s.get("description"),
+                        "state": app_state(status, runtime, error), "status": status, "runtime": runtime, "error": error,
+                        "address": props.get("serviceFqdn"), "ports": [p for p in ports if p], "created": s.get("createdAt")})
+        return sorted(out, key=lambda x: x["name"] or "")
 
     def _summarize(self, a: dict[str, Any]) -> dict[str, Any]:
         tags = a.get("tags") or []
