@@ -52,8 +52,14 @@ One connection per user, made once in the dashboard, used by Claude Code and Age
 ### 3. Tools for agents: one place to connect MCP servers
 Phase 1 done (2026-11-27, dashboard 0.1.41): Add tool on the Tools page (Data Product MCP preset, custom URL with a
 key or token), edit, Check connection, + Add tool from the Agents page with the tool ticked on return, and a clear
-publish message when a tool's owner must allow the agent's app. Next: OAuth MCP servers with per-user tokens
-(phase 2), "as the user" / "as the owner" and tool status (phase 3).
+publish message when a tool's owner must allow the agent's app.
+Phase 2 done (2026-11-27, gateway and dashboard 0.1.43): OAuth MCP servers. Add a tool with only its URL; the
+dashboard finds out whether it asks people to sign in (discovery, dynamic client registration, PKCE), each person
+connects their own account, the gateway keeps their tokens encrypted in its database and refreshes them, and an
+agent says "Connect <tool> first" with a link. An app acts for a person only when the owner allowed it by name.
+Tested against a fake OAuth server; discovery also checked against Notion's and Linear's real MCP servers. Not yet
+tried end to end with a real account. Next: "as the owner" for shared tools and tool status (phase 3).
+The tokens live in the gateway database on the Volume, which has no backup (decided 2026-11-27).
 
 Tools are connected once on the **Tools** page; agents only choose them.
 
