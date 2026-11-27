@@ -88,7 +88,7 @@ class TraceStore:
     def client(self):
         if not self.url or not self.password:
             raise HTTPException(503, "Agent trace storage is not configured.")
-        return httpx.Client(base_url=self.url, auth=("dapp-traces", self.password), timeout=2.0,
+        return httpx.Client(base_url=self.url, auth=("dapp-traces", self.password), timeout=5.0,
                             transport=self.transport, trust_env=False)
 
     @staticmethod

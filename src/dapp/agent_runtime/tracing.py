@@ -74,7 +74,8 @@ class AgentTrace:
             report = TraceReport(trace_id=self.trace_id, model=model, version=version, ok=ok,
                                  start_ns=self.start_ns, end_ns=max(self.start_ns, time.time_ns()),
                                  steps=self.steps)
-            with httpx.Client(timeout=2.0, transport=transport) as http:
+            # A fresh MLflow takes a few seconds to create the experiment for the first trace; 2s dropped it.
+            with httpx.Client(timeout=8.0, transport=transport) as http:
                 response = http.post(f"{gateway.rstrip('/')}/agent-traces",
                                      headers={"Authorization": f"Bearer {key}", "x-dapp-user": user},
                                      json=report.model_dump(exclude_none=True))
