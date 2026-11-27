@@ -1,0 +1,17 @@
+# Public front door of the gateway Service: https://<fqdn>/dapp-gateway/... -> http://dapp-gateway:8080 (deploy/gateway.service.yaml).
+# A DataOS Service has no public path, so the CLI, the dashboard, Claude Code's tool bridge and browsers come in through this app.
+# Apps inside DataOS skip it: they call http://dapp-gateway:8080 directly. No sign-in here; the gateway checks every call itself.
+#   dapp deploy -f deploy/gateway-front.dapp.yaml
+name: dapp-gateway-front
+description: Public path /dapp-gateway for the gateway Service (forwards every request)
+runtime: python-3.12
+code: ./gateway-front/app
+run: python server.py
+compute: engineering-compute
+hostname: dapp-gateway-front
+path: /dapp-gateway
+stripPath: true
+public: true
+resources: {cpu: 50m, memory: 128Mi, cpuLimit: 500m, memoryLimit: 384Mi}
+env:
+  UPSTREAM: http://dapp-gateway:8080

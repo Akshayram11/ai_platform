@@ -1,3 +1,5 @@
+# NOTE (2026-11-27): the gateway now runs as a DataOS Service (deploy/gateway.service.yaml) with the public path served by
+# deploy/gateway-front.dapp.yaml. This app version is the fallback: remove the two above first (same hostname, same Volume).
 # The dapp gateway (LLM calls and MCP tools), deployed as a DataOS app with dapp itself:
 #   dapp secret apply deploy/secrets/dapp-gateway-providers.yaml --env-file .env.gateway   # the provider keys
 #   dapp deploy -f deploy/gateway.dapp.yaml

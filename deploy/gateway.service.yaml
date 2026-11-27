@@ -1,0 +1,48 @@
+# The dapp gateway as a DataOS Service (not an app). Apply with dataos-ctl (dapp deploy only makes apps):
+#   dataos-ctl resource apply -f deploy/gateway.service.yaml
+# Apps reach it in-cluster at http://dapp-gateway:8080 (spec.hostname), exactly as before. A Service has no public path:
+# the public https://<fqdn>/dapp-gateway/... comes from deploy/gateway-front.dapp.yaml, a small app that forwards to it.
+# Needs first: Volume dapp-gateway-data (deploy/gateway-data.volume.yaml) and secrets dapp-gateway-providers (OPENAI_API_KEY),
+# dapp-gateway-tools (DAPP_GATEWAY_SECRET_KEY), dapp-gateway-local (LLM_SMALL_KEY).
+version: v2alpha
+name: dapp-gateway-core
+type: service
+description: LLM gateway for DataOS apps; meters tokens per app (Service; public path via dapp-gateway-front)
+spec:
+  hostname: dapp-gateway
+  compute: engineering-compute
+  stateful: true                # a Volume can only be attached to a stateful Service
+  replicas: 1                   # SQLite on one disk is single-writer; use Postgres (DATABASE_URL) to scale out
+  runAsUser: akshaychametmdcio
+  servicePorts:
+    - name: http
+      port: 8080
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  stack: container
+  use:
+    volumes:
+      - id: dapp-gateway-data   # app keys, tools, usage and budgets (SQLite)
+        directory: /data
+        readOnly: false
+    projection:
+      secrets:
+        - {id: "engineering:dapp-gateway-providers", contextAlias: providers}
+        - {id: "engineering:dapp-gateway-tools", contextAlias: tools}
+        - {id: "engineering:dapp-gateway-local", contextAlias: local}
+      projections:
+        envVars:
+          - {key: OPENAI_API_KEY, template: "{{ secrets['providers'].OPENAI_API_KEY | base64_decode }}"}
+          - {key: DAPP_GATEWAY_SECRET_KEY, template: "{{ secrets['tools'].DAPP_GATEWAY_SECRET_KEY | base64_decode }}"}
+          - {key: LLM_SMALL_KEY, template: "{{ secrets['local'].LLM_SMALL_KEY | base64_decode }}"}
+          - {key: DATABASE_URL, templateType: none, template: "sqlite:////data/gateway.db"}
+          - {key: DATAOS_FQDN, templateType: none, template: "poliks.instance.dataos.cloud"}
+          - {key: ROOT_PATH, templateType: none, template: "/dapp-gateway"}
+          - {key: DAPP_TOOL_INTERNAL_HOSTS, templateType: none, template: "demo-tools,immortal-obj,dapp-monitor"}
+          - key: DAPP_PRICING
+            templateType: none
+            template: '{"gpt-6-luna": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125}, "gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075}}'
+  stackSpec:
+    image: docker.io/tmdcio/dataos-apps:0.1.37
+    command: [dapp-gateway]
