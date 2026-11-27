@@ -9,6 +9,30 @@ with one small file, and everyone can see what they've deployed, what it uses, a
 | **LLM gateway** (`src/dapp_gateway`) | Apps call it instead of OpenAI/Anthropic. It holds the real provider keys, gives each app its own key, and records tokens per app, owner and model. |
 | **Dashboard** (`src/dapp_dashboard`) | Shows your apps with status, pods, CPU/memory, LLM tokens and cost, secrets, access, logs and keys. Every call runs as the signed-in user, so DataOS permissions apply. |
 
+## Everything you can use, and how
+
+`<fqdn>` is your DataOS instance (for us `poliks.instance.dataos.cloud`). Every app page is behind DataOS sign-in
+unless the table says otherwise.
+
+| Piece | What it is for | Where | How to use it |
+|---|---|---|---|
+| **`dapp` CLI** | Deploy and manage apps from a terminal, as you | your laptop (see Install below), or inside Claude Code | `dapp doctor` checks your machine. `dapp init NAME --template chatbot`, then `dapp deploy`. `dapp ls`, `dapp status APP`, `dapp logs APP`, `dapp rm APP --yes`. Add `--json` for scripts and agents. |
+| **Dashboard** | See and manage everything in one place: apps, Services, models, pipelines, storage, tools, keys, agents | `https://<fqdn>/dapp/` | Sign in with DataOS. **Apps** lists your apps (and Services); open one for logs, access, secrets, LLM usage and token budgets. **All apps** shows the whole tenant. |
+| **LLM gateway** | One place for LLM calls and MCP tools: holds the real OpenAI key, gives each app its own key, counts tokens per app and per person, enforces monthly budgets | Service `dapp-gateway-core`, inside DataOS at `http://dapp-gateway:8080`; public `https://<fqdn>/dapp-gateway/` (app `dapp-gateway-front`, shows an info page in a browser) | **App:** `llm: true` in dapp.yaml; use the normal OpenAI SDK with `api_key=os.environ["DAPP_LLM_KEY"]` (the base URL is set for you). **Laptop:** `dapp llm-key personal --save ~/.dapp/llm.env`. **Budgets:** `dapp budget set APP --app 5M --per-user 200k`, `dapp budget show APP`. **Usage:** `dapp usage APP`. See [docs/llm-gateway.md](docs/llm-gateway.md). |
+| **Small models** | Run a small LLM on DataOS CPUs: no OpenAI bill, prompts stay inside DataOS | dashboard **Models** tab | `dapp model catalog` (cost and speed), `dapp model deploy qwen2.5-0.5b --name small`, then ask for `model="small"` through the gateway. On poliks add `DAPP_MODELS_DATAPLANE=poliksdp01` (the default dataplane is gone). See [docs/models.md](docs/models.md). |
+| **MCP tools** (`dapp tool`) | Put any MCP server behind the gateway: it checks who may call, injects the tool's credential, records every call | `https://<fqdn>/dapp-gateway/mcp/<tenant>/<tool>`, dashboard **Tools** page | `dapp tool ls`. `dapp tool add NAME --url URL --auth-env VAR`, `dapp tool allow NAME "*"` or `app:APP`. In Claude Code: `dapp tool connect NAME`. In an app: `tools: [NAME]` with `llm: true`. |
+| **dapp-monitor** | MCP tool that reads status and logs of apps and Services (recent logs, logs over any time range, error counts), read-only | gateway tool `dapp-monitor` | Functions: `list_resources`, `list_apps`, `status`, `app_status`, `recent_logs`, `search_logs`, `log_summary`. Claude Code: `dapp tool connect dapp-monitor` (then ask "why did X fail?"). An app: `tools: [dapp-monitor]` and `dapp tool allow dapp-monitor app:APP`. See [docs/dapp-monitor.md](docs/dapp-monitor.md). |
+| **Log Assistant** | A logs page with an AI button: ask about your apps and Services in plain words; it reads the logs itself through dapp-monitor | `https://<fqdn>/log-assistant/` | Open it, pick a resource, or ask "is chatbot healthy?". Share it: `dapp access allow log-assistant USER`. |
+| **immortal-obj** | Durable storage for apps and agents: small SQLite objects (key-value or SQL) that survive restarts, one owner each, shareable | gateway tool `immortal-obj`, dashboard **Storage** page | **App:** `objects: true` in dapp.yaml, then `from dapp_objects import objects` and `objects.open("chat", for_user=user)`. **People / Claude Code:** `dapp tool connect immortal-obj` (put, get, keys, sql, share, …). See [docs/immortal-obj.md](docs/immortal-obj.md). |
+| **Claude Code** | Claude Code in the browser, with `dapp` inside: ask it to build and deploy an app, it gives you the URL | `https://<fqdn>/claude-code/` (only its owner) | Open it, sign in to Claude once, ask in plain words ("make a Streamlit dashboard of X and deploy it"). Servers you run there open at `/claude-code/port/<port>/`. After a fresh disk run `dapp tool connect dapp-monitor` once. See [docs/claude-code.md](docs/claude-code.md). |
+| **Agent Builder** | Make an AI agent without code: a model, instructions and up to 8 MCP tools; try it, then publish it as its own app | dashboard **Agents** page | Fill in title, model and instructions, tick tools, **Preview** to chat with it, **Publish** to deploy it (app `agent-<name>-<id>`). Every publish is a version you can roll back to. Drafts are kept in immortal-obj. |
+| **Chatbot** | A ready chat app (no code), with a model switch, chat history and optional tools | `https://<fqdn>/<name>/` | `dapp init mychat --template chatbot && dapp deploy`. Open a model directly with `?model=NAME`. A system prompt goes in `env: SYSTEM_PROMPT:`. |
+| **Data Chat** | Ask about DataOS data products in plain words; the app finds the numbers, the small model explains them | `https://<fqdn>/data-chat/` | Needs the tool `dataproduct-mcp` and the model `small`. `dapp deploy -f examples/data-chat/dapp.yaml`. See [docs/data-chat.md](docs/data-chat.md). |
+| **Pipelines** | Move data with DataOS Nilus (batch, CDC, stream, catalog), as you; access stays governed | dashboard **Pipelines** tab | `dapp pipeline depots`, `dapp pipeline new NAME --from DEPOT:schema.table --to DEPOT --how once`, `dapp pipeline status NAME`. See [docs/pipelines.md](docs/pipelines.md). |
+| **Apps from source** | Deploy Python code without Docker: the code is packed into a secret and run on a ready image | any app | In dapp.yaml: `runtime: python-3.12`, `code: ./app`, `run: ...`. The image already has fastapi, streamlit, pandas, openai, httpx, plotly and more. On poliksdp01 extra `requirements.txt` packages can't download (files.pythonhosted.org times out), so stick to those. See [docs/run-from-source.md](docs/run-from-source.md). |
+| **Access** | Who may open an app | dashboard: app → **Access** | `dapp access allow APP USER`, `dapp access deny APP USER`, `dapp access ls APP`. `public: true` in dapp.yaml removes sign-in (only for apps that check callers themselves, like the gateway). |
+| **Volumes** | Data that outlives the app (a DataOS disk). No backup or snapshot is taken | `volumes:` in dapp.yaml | `volumes: [{id: VOLUME, directory: /data}]`; create the Volume first (e.g. `deploy/gateway-data.volume.yaml`). One pod at a time. |
+
 ## Install on a laptop (and remove)
 
 You need `dataos-ctl` (logged in: `dataos-ctl login`, then `dataos-ctl tenant select`), or a DataOS API key for
@@ -285,7 +309,8 @@ existing app (we did it with the gateway) leaves the old workload running as an 
 that the Service still selects: intermittent 401s and usage split across two databases. A workload is named from the
 app's creation stamp, so the fix without cluster access is to delete the app and create it again (new stamp, new
 selector), ideally under a new name so the orphan's metrics don't count toward the new app. Decide `disk:` before the
-first deploy. The gateway is now `dapp-llm-gateway` (hostname `dapp-gateway` and path `/dapp-gateway` unchanged).
+first deploy. The gateway now runs as the DataOS Service `dapp-gateway-core` (hostname `dapp-gateway` and path
+`/dapp-gateway` unchanged; the public path comes from the app `dapp-gateway-front`).
 
 ## CPU and memory
 
@@ -307,10 +332,10 @@ helper show "no data". Series are prefixed `dapp_` and carry a `pod` label so re
 ## Running the platform pieces
 
 ```bash
-docker build -t <registry>/dataos-apps:0.1.15 .
-# fill the REPLACE_ME values, then:
-dapp deploy -f deploy/gateway.dapp.yaml
-dapp deploy -f deploy/dashboard.dapp.yaml     # → https://<fqdn>/dapp/
+docker buildx build --platform linux/amd64 -t <registry>/dataos-apps:0.1.N --push .
+dataos-ctl resource apply -f deploy/gateway.service.yaml   # the gateway, as a DataOS Service
+dapp deploy -f deploy/gateway-front.dapp.yaml               # its public path /dapp-gateway
+dapp deploy -f deploy/dashboard.dapp.yaml                   # → https://<fqdn>/dapp/
 ```
 
 Local dashboard against your dataos-ctl login:
