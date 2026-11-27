@@ -58,7 +58,12 @@ dashboard finds out whether it asks people to sign in (discovery, dynamic client
 connects their own account, the gateway keeps their tokens encrypted in its database and refreshes them, and an
 agent says "Connect <tool> first" with a link. An app acts for a person only when the owner allowed it by name.
 Tested against a fake OAuth server; discovery also checked against Notion's and Linear's real MCP servers. Not yet
-tried end to end with a real account. Next: "as the owner" for shared tools and tool status (phase 3).
+tried end to end with a real account.
+Phase 3 done (2026-11-27, gateway and dashboard 0.1.44): "Whose account does it use?" on each OAuth tool: each
+person's own (default) or everyone uses the owner's (only the owner chooses, only after connecting; the Tools page
+warns what that shares). Tools you own show status (working / failing, with a hint when it was HTTP 401 or 403, or no
+calls yet), when it was last called, and which of your agents use it. The Agent Builder marks tools that ask people to
+sign in (and whether you are connected, with a Connect link), and publishing says what that means for viewers.
 The tokens live in the gateway database on the Volume, which has no backup (decided 2026-11-27).
 
 Tools are connected once on the **Tools** page; agents only choose them.
