@@ -17,6 +17,26 @@ class ToolError(RuntimeError):
     pass
 
 
+class ToolNotConnected(ToolError):
+    """The tool asks each person to sign in and this person hasn't: `link` is where they do it."""
+
+    def __init__(self, message: str, link: str = ""):
+        super().__init__(message)
+        self.link = link
+
+
+def _not_connected(r: httpx.Response) -> ToolNotConnected | None:
+    if r.status_code != 401:
+        return None
+    try:
+        err = r.json()["error"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    if isinstance(err, dict) and err.get("type") == "tool_not_connected":
+        return ToolNotConnected(str(err.get("message") or "Connect the tool first."), str(err.get("connect_url") or ""))
+    return None
+
+
 def _messages(resp: httpx.Response) -> list[dict]:
     """A JSON-RPC reply comes as JSON or as an SSE stream of `data:` lines."""
     if "text/event-stream" in resp.headers.get("content-type", ""):
@@ -72,6 +92,8 @@ class Server:
         r = self._post({"jsonrpc": "2.0", "id": self._id, "method": "initialize", "params": {
             "protocolVersion": self.protocol, "capabilities": {},
             "clientInfo": {"name": "dapp-agent", "version": "1"}}}, user)
+        if (nc := _not_connected(r)) is not None:
+            raise nc
         if r.status_code >= 400:
             raise ToolError(f"{self.name}: HTTP {r.status_code} {r.text[:200]}")
         self.session = r.headers.get("mcp-session-id")
@@ -91,6 +113,8 @@ class Server:
                 if r.status_code == 404 and self.session and attempt == 1 and method != "tools/call":
                     self.session, self.opened = None, False  # server restarted, session lost: reopen once
                     continue
+                if (nc := _not_connected(r)) is not None:
+                    raise nc
                 if r.status_code >= 400:
                     raise ToolError(f"{self.name}: HTTP {r.status_code} {r.text[:300]}")
                 for m in _messages(r):

@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 import yaml
@@ -249,8 +250,6 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
             "error": request.query_params.get("err"), **ctx})
 
     def back(request: Request, path: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
-        from urllib.parse import urlencode
-
         q = urlencode({k: v for k, v in (("msg", msg), ("err", err)) if v})
         root = request.scope.get("root_path", "")
         sep = "&" if "?" in path else "?"  # paths like /apps/x?tab=access already have a query string
@@ -667,6 +666,7 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
         return render(request, "tools.html", s, tools=listed, usage=usage, by_fn=by_fn, days=days,
                       gateway_url=gateway_public_url(Context("d", fqdn, s.tenant)),
                       presets=[p for p in tool_presets(fqdn) if p["name"] not in names],
+                      connect=request.query_params.get("connect", ""),
                       adding=bool(request.query_params.get("add")) or (isinstance(listed, list) and not listed),
                       back_to=back_to if _local_path(back_to) else "", added=request.query_params.get("added", ""))
 
@@ -684,9 +684,49 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
 
     def _tool_saved(request: Request, name: str, note: str, back_to: str) -> RedirectResponse:
         q = {"added": name, **({"return": back_to} if _local_path(back_to) else {})}
-        from urllib.parse import urlencode
         good = ": connected" in note
         return back(request, "/tools?" + urlencode(q), **({"msg": note} if good else {"err": note}))
+
+    def oauth_callback(request: Request) -> str:
+        base = os.environ.get("DAPP_PUBLIC_URL", "").rstrip("/") or f"https://{fqdn}{request.scope.get('root_path', '')}"
+        return f"{base}/tools/oauth/callback"
+
+    def begin_sign_in(request: Request, s, name: str, back_to: str) -> RedirectResponse:
+        try:
+            url = gateway_for(s).oauth_start(s.tenant, name, back_to)["authorize_url"]
+        except GatewayError as e:
+            return back(request, "/tools", err=f"{name}: {e}")
+        return RedirectResponse(url, status_code=303)
+
+    @api.post("/tools/{name}/connect")
+    def tool_connect(request: Request, name: str, back_to: str = Form("", alias="return"), csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        return begin_sign_in(request, s, name, back_to if _local_path(back_to) else "/tools")
+
+    @api.get("/tools/oauth/callback")
+    def tool_callback(request: Request, code: str = "", state: str = "", error: str = "", error_description: str = ""):
+        s = need(request)
+        if error or not code or not state:
+            return back(request, "/tools", err="The sign-in was not completed" + (f": {error_description or error}"
+                                                                                   if error else ""))
+        try:
+            done = gateway_for(s).oauth_finish(state, code)
+        except GatewayError as e:
+            return back(request, "/tools", err=str(e))
+        target = done.get("back") or "/tools"
+        target = target if _local_path(target) else "/tools"
+        sep = "&" if "?" in target else "?"
+        return RedirectResponse(f"{request.scope.get('root_path', '')}{target}{sep}"
+                                + urlencode({"msg": f"{done['tool']}: connected as you", "connected": done["tool"]}),
+                                status_code=303)
+
+    @api.post("/tools/{name}/disconnect")
+    def tool_disconnect(request: Request, name: str, csrf: str = Form("")):
+        s = need(request)
+        check_csrf(s, csrf)
+        return _act(request, "/tools", lambda: gateway_for(s).oauth_disconnect(s.tenant, name),
+                    f"{name}: disconnected. Connect again any time.")
 
     @api.post("/tools/add")
     def tool_add(request: Request, name: str = Form(""), url: str = Form(""), description: str = Form(""),
@@ -702,6 +742,17 @@ def create_app(heimdall: Heimdall | None = None, login: Login | None = None, *, 
                                       auth_value=auth_value.strip() or None, allow=["*"] if everyone else None)
         except (DataOSError, PlatformError, GatewayError, ValueError) as e:
             return back(request, "/tools?add=1", err=str(e))
+        if not auth_value.strip():
+            # No key given: does the server ask each person to sign in (OAuth, like Notion)? If so, set that up and
+            # send the owner straight to sign in; the others connect the same way, with their own account.
+            try:
+                found = gateway_for(s).oauth_setup(s.tenant, name, oauth_callback(request))
+            except GatewayError as e:
+                return back(request, "/tools?" + urlencode({"added": name}), err=f"{name}: saved, but sign-in could not be "
+                                                                                 f"set up: {e}")
+            if found.get("needs_sign_in"):
+                return begin_sign_in(request, s, name, "/tools?" + urlencode({"added": name, **(
+                    {"return": back_to} if _local_path(back_to) else {})}))
         return _tool_saved(request, name, check_tool(s, name), back_to)
 
     @api.post("/tools/{name}/edit")

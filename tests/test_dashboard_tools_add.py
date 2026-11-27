@@ -4,10 +4,12 @@ from typing import ClassVar
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from test_dashboard import FakePlatform, signed_in_with_fakes
+import test_dashboard
+from test_dashboard import FakeGateway, FakePlatform, signed_in_with_fakes
 
 import dapp_dashboard.app as dash
 from dapp.agent_runtime.mcp_transport import ToolError
+from dapp.usage import GatewayError
 
 SAVED = []
 ANSWERS = {"demo-tools": {"tools": [{"name": "calculate"}, {"name": "time_in"}]}}
@@ -34,11 +36,44 @@ class FakeServer:
         return ANSWERS[self.name]
 
 
+class OAuthGateway(FakeGateway):
+    """The gateway side of sign-in: does the server ask people to sign in? Where does the browser go? Who is connected?"""
+    needs_sign_in = False
+    calls: ClassVar[list] = []
+
+    def oauth_setup(self, tenant, name, redirect_uri, **kw):
+        OAuthGateway.calls.append(("setup", tenant, name, redirect_uri))
+        return {"tool": f"{tenant}/{name}", "needs_sign_in": OAuthGateway.needs_sign_in}
+
+    def oauth_start(self, tenant, name, back=""):
+        OAuthGateway.calls.append(("start", tenant, name, back))
+        return {"authorize_url": f"https://auth.example.com/authorize?state=s1&tool={name}"}
+
+    def oauth_finish(self, state, code):
+        OAuthGateway.calls.append(("finish", state, code))
+        if code == "bad":
+            raise GatewayError("this sign-in expired; connect again")
+        return {"tool": "notion", "tenant": "engineering", "connected": True, "back": "/agents"}
+
+    def oauth_disconnect(self, tenant, name):
+        OAuthGateway.calls.append(("disconnect", tenant, name))
+        return {"disconnected": True}
+
+    def list_tools(self, tenant=None):
+        return [*super().list_tools(tenant),
+                {"name": "notion", "owner": "alice", "mine": True, "has_auth": False, "description": "pages",
+                 "url": "https://mcp.example.com/mcp", "allow": ["*"], "auth_mode": "oauth", "connected": False,
+                 "connected_users": 2, "endpoint": "/mcp/engineering/notion"}]
+
+
 @pytest.fixture
 def c(monkeypatch):
     SAVED.clear()
     FakeServer.seen.clear()
+    OAuthGateway.calls = []
+    OAuthGateway.needs_sign_in = False
     monkeypatch.setattr(dash, "Server", FakeServer)
+    monkeypatch.setattr(test_dashboard, "FakeGateway", OAuthGateway)
     return signed_in_with_fakes(monkeypatch, platform_factory=lambda s, t=None: ToolPlatform())
 
 
@@ -96,3 +131,42 @@ def test_edit_keeps_or_removes_the_key(c):
     assert query(r)["msg"].startswith("demo-tools: connected")
     assert c.post("/tools/add", data={"name": "x", "url": "https://a/mcp", "csrf": "nope"},
                   follow_redirects=False).status_code == 403
+
+
+def test_a_server_that_asks_for_sign_in_sends_the_owner_to_sign_in(c):
+    OAuthGateway.needs_sign_in = True
+    token = csrf(c.get("/tools").text)
+    r = c.post("/tools/add", data={"name": "notion", "url": "https://mcp.example.com/mcp", "return": "/agents",
+                                   "csrf": token}, follow_redirects=False)
+    assert SAVED[-1][1]["auth_value"] is None
+    assert OAuthGateway.calls[0] == ("setup", "engineering", "notion", "https://x.dataos.cloud/tools/oauth/callback")
+    assert r.status_code == 303 and r.headers["location"].startswith("https://auth.example.com/authorize")
+    kind, _, name, back = OAuthGateway.calls[1]
+    assert (kind, name) == ("start", "notion") and back.startswith("/tools?") and "return=%2Fagents" in back
+
+
+def test_a_key_skips_the_sign_in_check(c):
+    token = csrf(c.get("/tools").text)
+    c.post("/tools/add", data={"name": "jira2", "url": "https://mcp.example.com/mcp", "auth_value": "abc",
+                               "csrf": token}, follow_redirects=False)
+    assert not [x for x in OAuthGateway.calls if x[0] == "setup"]
+
+
+def test_connect_callback_and_disconnect(c):
+    html = c.get("/tools?connect=notion").text
+    token = csrf(html)
+    assert "You have not connected it" in html and "oauth-focus" in html and "2 people have connected" in html
+    assert "/tools/notion/check" not in html                                          # no key to check on this one
+    r = c.post("/tools/notion/connect", data={"return": "/agents", "csrf": token}, follow_redirects=False)
+    assert r.headers["location"].startswith("https://auth.example.com/authorize")
+    assert OAuthGateway.calls[-1] == ("start", "engineering", "notion", "/agents")
+    assert c.post("/tools/notion/connect", data={"csrf": "nope"}, follow_redirects=False).status_code == 403
+    back = c.get("/tools/oauth/callback?code=abc&state=s1", follow_redirects=False)
+    assert back.status_code == 303 and back.headers["location"].startswith("/agents?")
+    assert query(back)["connected"] == "notion" and "connected+as+you" in back.headers["location"]
+    bad = c.get("/tools/oauth/callback?code=bad&state=s1", follow_redirects=False)
+    assert "expired" in query(bad)["err"] and bad.headers["location"].startswith("/tools?")
+    declined = c.get("/tools/oauth/callback?error=access_denied&error_description=No", follow_redirects=False)
+    assert "not completed: No" in query(declined)["err"]
+    c.post("/tools/notion/disconnect", data={"csrf": token}, follow_redirects=False)
+    assert OAuthGateway.calls[-1] == ("disconnect", "engineering", "notion")

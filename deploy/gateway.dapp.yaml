@@ -6,7 +6,7 @@
 # .env.gateway (gitignored): OPENAI_API_KEY=..., optionally ANTHROPIC_API_KEY=..., DATABASE_URL=postgresql+psycopg://...
 name: dapp-llm-gateway          # moving from inline disk to a Volume means recreating the app once (dapp rm, then deploy)
 description: LLM gateway for DataOS apps; meters tokens per app
-image: docker.io/tmdcio/dataos-apps:0.1.37
+image: docker.io/tmdcio/dataos-apps:0.1.43
 command: [dapp-gateway]
 port: 8080
 compute: engineering-compute

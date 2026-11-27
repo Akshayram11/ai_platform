@@ -8,11 +8,12 @@ import sqlite3
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from test_dashboard import FakeLogin
 
 from dapp.agent_runtime import engine
-from dapp.agent_runtime.engine import AgentConfig, Chat, run_agent
+from dapp.agent_runtime.engine import AgentConfig, AgentError, Chat, run_agent
 from dapp.auth import Identity
 from dapp.client import DataOSError
 from dapp_dashboard.app import create_app
@@ -246,3 +247,20 @@ def test_action_is_never_replayed_after_an_uncertain_gateway_error():
         with pytest.raises(ToolError, match="HTTP 502"):
             server.call("tools/call", {"name": "change_state", "arguments": {}}, "alice")
         assert counts["calls"] == 1
+
+
+def test_a_tool_the_person_has_not_connected_says_where_to_connect():
+    link = "https://test.invalid/dapp/tools?connect=notion"
+
+    def respond(request):
+        assert request.url.path == "/mcp/engineering/notion"
+        return httpx.Response(401, json={"error": {
+            "type": "tool_not_connected", "tool": "notion", "connect_url": link,
+            "message": f"alice has not connected notion. Connect it once: {link}"}})
+
+    config = AgentConfig(title="Notes", model="gpt-6-luna", instructions="Use notion.", tools=["notion"])
+    chat = Chat(messages=[{"role": "user", "content": "find my notes"}])
+    with pytest.raises(AgentError) as caught:
+        run_agent(config, chat, gateway="https://gateway.test", key="k", tenant="engineering", user="alice",
+                  transport=httpx.MockTransport(respond))
+    assert str(caught.value) == f"Connect notion first. alice has not connected notion. Connect it once: {link}"

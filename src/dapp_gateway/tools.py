@@ -26,19 +26,23 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from dapp.auth import Heimdall, Identity, IdentityUnavailable, token_from_headers
 
+from . import oauth
 from .store import KEY_PREFIX, TOOL_GROUPABLE, Store, Tool, tool_view
 
 log = logging.getLogger("dapp.gateway.tools")
@@ -150,10 +154,41 @@ class AccessRequest(BaseModel):
     deny: list[str] = []
 
 
+class OAuthSetup(BaseModel):
+    redirect_uri: str                # the dashboard's callback; the MCP server sends people back there
+    client_id: str = ""              # only for servers without dynamic client registration
+    client_secret: str = ""
+    scope: str | None = None         # None: what the server says it supports
+
+
+class OAuthStart(BaseModel):
+    back: str = ""                   # a dashboard page to return to afterwards
+
+
+class OAuthFinish(BaseModel):
+    state: str
+    code: str
+
+
+def connect_url(name: str) -> str:
+    base = os.environ.get("DAPP_DASHBOARD_URL") or f"https://{os.environ.get('DATAOS_FQDN', '')}/dapp"
+    return f"{base.rstrip('/')}/tools?connect={name}"
+
+
+def not_connected(t: Tool, person: str) -> JSONResponse:
+    """What a caller gets when the person hasn't signed in to an OAuth tool (or their sign-in ran out)."""
+    link = connect_url(t.name)
+    who = person or "the person using this app"
+    return JSONResponse({"error": {"type": "tool_not_connected", "tool": t.name, "connect_url": link,
+                                   "message": f"{who} has not connected {t.name}. Connect it once: {link}"}},
+                        status_code=401)
+
+
 def mount_tools(api: FastAPI, *, store: Store, heimdall: Heimdall | None, caller: Callable[..., Identity],
                 admins: set[str], upstream: httpx.AsyncClient, clean_user: Callable[[str | None], str],
-                vault: Vault | None = None) -> None:
+                vault: Vault | None = None, oauth_http: httpx.Client | None = None) -> None:
     vault = vault or Vault()
+    oauth_http = oauth_http or httpx.Client(timeout=httpx.Timeout(20, connect=5), follow_redirects=False)
 
     def find(tenant: str, name: str) -> Tool:
         t = store.get_tool(tenant, name)
@@ -198,6 +233,9 @@ def mount_tools(api: FastAPI, *, store: Store, heimdall: Heimdall | None, caller
         t = store.save_tool(tenant=body.tenant, name=body.name, owner=existing.owner if existing else ident.user_id,
                             url=url, description=body.description[:512], auth_header=header,
                             auth_secret=secret, allow=None if body.allow is None else clean_allow(body.allow))
+        if body.auth_value and (t.auth_mode or "key") == "oauth":       # a key given: back to one key for everyone
+            store.set_tool_oauth(body.tenant, body.name, mode="key", sealed="")
+            t = store.get_tool(body.tenant, body.name)
         log.info("%s tool %s/%s by %s", "updated" if existing else "registered", body.tenant, body.name,
                  ident.user_id)
         return tool_view(t, full=True)
@@ -208,7 +246,12 @@ def mount_tools(api: FastAPI, *, store: Store, heimdall: Heimdall | None, caller
         for t in store.list_tools():
             if (tenant and t.tenant != tenant) or not may_use(t, ident.user_id):
                 continue
-            out.append({**tool_view(t, full=ident.user_id in (t.owner, *admins)), "mine": t.owner == ident.user_id})
+            row = {**tool_view(t, full=ident.user_id in (t.owner, *admins)), "mine": t.owner == ident.user_id}
+            if (t.auth_mode or "key") == "oauth":
+                row["connected"] = store.get_token(t.tenant, t.name, ident.user_id) is not None
+                if row["mine"]:
+                    row["connected_users"] = store.connected_users(t.tenant, t.name)
+            out.append(row)
         return out
 
     @api.get("/admin/tools/{tenant}/{name}")
@@ -240,6 +283,110 @@ def mount_tools(api: FastAPI, *, store: Store, heimdall: Heimdall | None, caller
         rows = store.tool_summary(owner=owner, tool=tool, tenant=tenant, since_hours=since_hours, group_by=wanted)
         return {"owner": owner or "*", "since_hours": since_hours, "rows": rows,
                 "total": {"calls": sum(r["calls"] for r in rows), "errors": sum(r["errors"] for r in rows)}}
+
+    # ------------------------------------------------------------ OAuth MCP servers: each person signs in
+    def oauth_meta(t: Tool) -> dict[str, Any]:
+        if (t.auth_mode or "key") != "oauth" or not t.oauth:
+            raise HTTPException(409, f"tool {t.tenant}/{t.name} does not use sign-in (OAuth)")
+        return json.loads(vault.open(t.oauth))
+
+    def keep_tokens(t: Tool, person: str, reply: dict[str, Any], *, first: bool) -> str:
+        access = reply["access_token"]
+        expires = None
+        if isinstance(reply.get("expires_in"), int | float):
+            expires = datetime.now(UTC) + timedelta(seconds=float(reply["expires_in"]))
+        refresh = reply.get("refresh_token")
+        store.save_token(tenant=t.tenant, tool=t.name, user=person, access=vault.seal(access),
+                         refresh=vault.seal(refresh) if refresh else ("" if first else None), expires=expires,
+                         scope=str(reply.get("scope") or ""))
+        return access
+
+    def person_token(t: Tool, person: str) -> str | None:
+        """This person's access token for the tool, refreshed when it is about to run out. None: not connected."""
+        tok = store.get_token(t.tenant, t.name, person)
+        if tok is None:
+            return None
+        expires = tok.expires.replace(tzinfo=UTC) if tok.expires and tok.expires.tzinfo is None else tok.expires
+        if expires is None or expires > datetime.now(UTC) + timedelta(seconds=60):
+            return vault.open(tok.access)
+        if not tok.refresh:
+            store.delete_token(t.tenant, t.name, person)
+            return None
+        try:
+            reply = oauth.refresh(oauth_meta(t), vault.open(tok.refresh), oauth_http)
+        except (oauth.OAuthError, httpx.HTTPError) as e:
+            log.info("refresh of %s/%s for %s failed: %s", t.tenant, t.name, person, e)
+            store.delete_token(t.tenant, t.name, person)
+            return None
+        return keep_tokens(t, person, reply, first=False)
+
+    @api.post("/admin/tools/{tenant}/{name}/oauth/setup")
+    def oauth_setup(tenant: str, name: str, body: OAuthSetup, ident: Identity = Depends(caller)) -> dict[str, Any]:
+        """Find out how the tool's server signs people in and register the gateway with it. Owner only."""
+        t = find(tenant, name)
+        require_owner(t, ident)
+        redirect = check_tool_url(body.redirect_uri)
+        try:
+            meta = oauth.discover(t.url, oauth_http, check_tool_url)
+        except oauth.NoSignIn:
+            return {"tool": f"{tenant}/{name}", "auth_mode": t.auth_mode or "key", "needs_sign_in": False}
+        except (oauth.OAuthError, httpx.HTTPError) as e:
+            raise HTTPException(422, f"could not set up sign-in for {name}: {e}")
+        try:
+            reg = ({"client_id": body.client_id, "client_secret": body.client_secret,
+                    "auth_method": "client_secret_basic" if body.client_secret else "none"}
+                   if body.client_id else oauth.register(meta, redirect, oauth_http))
+        except (oauth.OAuthError, httpx.HTTPError) as e:
+            raise HTTPException(422, f"could not register with {meta['issuer']}: {e}")
+        meta.update(reg, redirect_uri=redirect)
+        if body.scope is not None:
+            meta["scope"] = body.scope
+        store.set_tool_oauth(tenant, name, mode="oauth", sealed=vault.seal(json.dumps(meta)))
+        log.info("tool %s/%s now signs people in through %s (by %s)", tenant, name, meta["issuer"], ident.user_id)
+        return {"tool": f"{tenant}/{name}", "auth_mode": "oauth", "needs_sign_in": True, "issuer": meta["issuer"],
+                "registered": not body.client_id}
+
+    @api.post("/admin/tools/{tenant}/{name}/oauth/start")
+    def oauth_start(tenant: str, name: str, body: OAuthStart, ident: Identity = Depends(caller)) -> dict[str, Any]:
+        """Where to send this person's browser to sign in. Anyone who may use the tool connects their own account."""
+        t = find(tenant, name)
+        if not may_use(t, ident.user_id):
+            raise HTTPException(404, f"no tool {tenant}/{name}")
+        meta = oauth_meta(t)
+        verifier, challenge = oauth.pkce()
+        state = secrets.token_urlsafe(24)
+        store.add_pending(state=state, tenant=tenant, tool=name, user=ident.user_id, verifier=vault.seal(verifier),
+                          back=body.back)
+        return {"authorize_url": oauth.authorize_url(meta, state=state, challenge=challenge)}
+
+    @api.post("/admin/oauth/finish")
+    def oauth_finish(body: OAuthFinish, ident: Identity = Depends(caller)) -> dict[str, Any]:
+        """The server sent the person back with a code: swap it for their tokens and keep them (encrypted)."""
+        p = store.pop_pending(body.state)
+        if p is None or p.user != ident.user_id:
+            raise HTTPException(400, "this sign-in expired or was started by someone else; connect again")
+        t = find(p.tenant, p.tool)
+        try:
+            reply = oauth.exchange(oauth_meta(t), code=body.code, verifier=vault.open(p.verifier), http=oauth_http)
+        except (oauth.OAuthError, httpx.HTTPError) as e:
+            raise HTTPException(502, f"{t.name} did not accept the sign-in: {e}")
+        keep_tokens(t, p.user, reply, first=True)
+        log.info("%s connected tool %s/%s", p.user, t.tenant, t.name)
+        return {"tool": t.name, "tenant": t.tenant, "connected": True, "back": p.back}
+
+    @api.get("/admin/tools/{tenant}/{name}/oauth/me")
+    def oauth_me(tenant: str, name: str, ident: Identity = Depends(caller)) -> dict[str, Any]:
+        t = find(tenant, name)
+        if not may_use(t, ident.user_id):
+            raise HTTPException(404, f"no tool {tenant}/{name}")
+        tok = store.get_token(tenant, name, ident.user_id)
+        return {"tool": name, "connected": tok is not None, "scope": tok.scope if tok else "",
+                "expires": tok.expires.isoformat() if tok and tok.expires else None}
+
+    @api.delete("/admin/tools/{tenant}/{name}/oauth/me")
+    def oauth_disconnect(tenant: str, name: str, ident: Identity = Depends(caller)) -> dict[str, Any]:
+        find(tenant, name)
+        return {"tool": name, "disconnected": store.delete_token(tenant, name, ident.user_id) > 0}
 
     # ------------------------------------------------------------ the MCP endpoint
     def who(request: Request, t: Tool) -> tuple[str, str]:
@@ -282,7 +429,21 @@ def mount_tools(api: FastAPI, *, store: Store, heimdall: Heimdall | None, caller
         headers["x-dapp-caller"] = caller_id              # a DataOS user id, or app:<name> for an app's gateway key
         if end_user:
             headers["x-dapp-end-user"] = end_user         # the person an app says it acts for (the app vouches)
-        if t.auth_header and t.auth_secret:
+        signed_in = (t.auth_mode or "key") == "oauth"
+        person = ""
+        if signed_in:
+            # Each person's own sign-in. An app gets one only for the person it says it serves, and only when the
+            # tool's owner allowed that app by name (app:* is not enough to borrow people's accounts).
+            if caller_id.startswith("app:") and caller_id not in allowed(t):
+                raise HTTPException(403, f"{caller_id} must be allowed by name to use {t.name} for its users; its "
+                                         f"owner can run: dapp tool allow {t.name} {caller_id}")
+            person = end_user if caller_id.startswith("app:") else caller_id
+            access = await run_in_threadpool(person_token, t, person) if person else None
+            if access is None:
+                record(t, caller_id, end_user, reqs, 401, set(), time.monotonic(), failed=True)
+                return not_connected(t, person)
+            headers["Authorization"] = f"Bearer {access}"
+        elif t.auth_header and t.auth_secret:
             headers[t.auth_header] = vault.open(t.auth_secret)
         started = time.monotonic()
         try:
@@ -291,6 +452,11 @@ def mount_tools(api: FastAPI, *, store: Store, heimdall: Heimdall | None, caller
         except httpx.HTTPError as e:
             record(t, caller_id, end_user, reqs, 502, set(), started, failed=True)
             raise HTTPException(502, f"tool {tenant}/{name} unreachable: {e.__class__.__name__}")
+        if signed_in and up.status_code == 401:           # the server no longer takes this token: sign in again
+            await up.aclose()
+            store.delete_token(t.tenant, t.name, person)
+            record(t, caller_id, end_user, reqs, 401, set(), started, failed=True)
+            return not_connected(t, person)
         resp_headers = {h: up.headers[h] for h in FORWARD_RESP if h in up.headers}
         ctype = up.headers.get("content-type", "")
         seen = bytearray()

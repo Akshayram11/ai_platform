@@ -10,7 +10,7 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-from .mcp_transport import Server, ToolError
+from .mcp_transport import Server, ToolError, ToolNotConnected
 
 ToolName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9-]{0,47}$")]
 
@@ -61,6 +61,8 @@ def run_agent(config: AgentConfig, chat: Chat, *, gateway: str, key: str, tenant
             server = Server(tool, f"{gateway.rstrip('/')}/mcp/{quote(tenant, safe='')}/{tool}", tool_token or key, http)
             try:
                 listed = server.call("tools/list", {}, user).get("tools", [])
+            except ToolNotConnected as exc:                  # each person signs in to this tool themselves
+                raise AgentError(f"Connect {tool} first. {exc}") from exc
             except (ToolError, ValueError, httpx.HTTPError) as exc:
                 raise AgentError(f"Could not load {tool}. Check its DataOS gateway access.") from exc
             if not listed:
@@ -124,6 +126,8 @@ def run_agent(config: AgentConfig, chat: Chat, *, gateway: str, key: str, tenant
                         ok = not raw.get("isError")
                         if not ok:
                             result = "Tool error: " + result
+                    except ToolNotConnected as exc:                   # signed out in the middle: say so, with the link
+                        result = f"Not connected: {exc}"
                     except (ToolError, TypeError, ValueError, httpx.HTTPError):
                         result = "The tool could not be called with these arguments."
                 steps.append({"server": reported, "tool": function, "ok": ok})

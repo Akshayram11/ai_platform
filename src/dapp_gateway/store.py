@@ -142,6 +142,38 @@ class Tool(Base):
     allow: Mapped[str] = mapped_column(Text, default="[]")          # JSON list: user ids, "*", "app:<name>"
     created: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    # "key": one credential for everyone (auth_header/auth_secret). "oauth": each person signs in to the MCP server
+    # themselves; `oauth` holds the server's endpoints and the gateway's client registration (encrypted JSON).
+    auth_mode: Mapped[str] = mapped_column(String(16), default="key")
+    oauth: Mapped[str] = mapped_column(Text, default="")
+
+
+class ToolToken(Base):
+    """One person's sign-in to an OAuth MCP server: their access and refresh tokens, encrypted. The gateway adds the
+    access token to that person's calls (or an app's calls made for them) and refreshes it; nobody else sees it."""
+    __tablename__ = "tool_tokens"
+    __table_args__ = (UniqueConstraint("tenant", "tool", "user"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(64), index=True)
+    tool: Mapped[str] = mapped_column(String(64), index=True)
+    user: Mapped[str] = mapped_column(String(128), index=True)
+    access: Mapped[str] = mapped_column(Text)
+    refresh: Mapped[str] = mapped_column(Text, default="")
+    expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scope: Mapped[str] = mapped_column(String(512), default="")
+    updated: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class OAuthPending(Base):
+    """A sign-in that has been started (state, PKCE verifier) and not finished yet. Lives ten minutes."""
+    __tablename__ = "oauth_pending"
+    state: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(64))
+    tool: Mapped[str] = mapped_column(String(64))
+    user: Mapped[str] = mapped_column(String(128))
+    verifier: Mapped[str] = mapped_column(Text)
+    back: Mapped[str] = mapped_column(String(512), default="")
+    created: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class LocalModel(Base):
@@ -183,7 +215,7 @@ TOOL_GROUPABLE = ("tool", "tenant", "caller", "end_user", "method", "tool_name",
 def tool_view(t: Tool, *, full: bool) -> dict:
     """What callers may see of a tool. Never the credential; the allow list only for its owner/admins."""
     out = {"tenant": t.tenant, "name": t.name, "owner": t.owner, "description": t.description,
-           "endpoint": f"/mcp/{t.tenant}/{t.name}", "has_auth": bool(t.auth_secret),
+           "endpoint": f"/mcp/{t.tenant}/{t.name}", "has_auth": bool(t.auth_secret), "auth_mode": t.auth_mode or "key",
            "created": t.created.isoformat(), "updated": t.updated.isoformat()}
     if full:
         out.update(url=t.url, auth_header=t.auth_header, allow=json.loads(t.allow or "[]"))
@@ -205,6 +237,12 @@ class Store:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE usage ADD COLUMN end_user VARCHAR(128) DEFAULT ''"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_usage_end_user ON usage (end_user)"))
+        tool_cols = {c["name"] for c in inspect(self.engine).get_columns("tools")}
+        with self.engine.begin() as conn:
+            if "auth_mode" not in tool_cols:
+                conn.execute(text("ALTER TABLE tools ADD COLUMN auth_mode VARCHAR(16) DEFAULT 'key'"))
+            if "oauth" not in tool_cols:
+                conn.execute(text("ALTER TABLE tools ADD COLUMN oauth TEXT DEFAULT ''"))
 
     # ---- keys
     def issue_key(self, *, tenant: str, app: str, owner: str, rotate: bool) -> str:
@@ -402,7 +440,62 @@ class Store:
 
     def delete_tool(self, tenant: str, name: str) -> int:
         with Session(self.engine) as s, s.begin():
+            s.execute(delete(ToolToken).where(ToolToken.tenant == tenant, ToolToken.tool == name))
             return s.execute(delete(Tool).where(Tool.tenant == tenant, Tool.name == name)).rowcount or 0
+
+    # ---- OAuth MCP servers: the server's settings, each person's tokens, sign-ins in progress
+    def set_tool_oauth(self, tenant: str, name: str, *, mode: str, sealed: str) -> None:
+        with Session(self.engine) as s, s.begin():
+            s.execute(update(Tool).where(Tool.tenant == tenant, Tool.name == name)
+                      .values(auth_mode=mode, oauth=sealed, updated=now()))
+
+    def get_token(self, tenant: str, tool: str, user: str) -> ToolToken | None:
+        with Session(self.engine) as s:
+            t = s.execute(select(ToolToken).where(ToolToken.tenant == tenant, ToolToken.tool == tool,
+                                                  ToolToken.user == user)).scalar_one_or_none()
+            if t is not None:
+                s.expunge(t)
+            return t
+
+    def save_token(self, *, tenant: str, tool: str, user: str, access: str, refresh: str | None,
+                   expires: datetime | None, scope: str) -> None:
+        """refresh None keeps the stored refresh token (servers may not send a new one on refresh)."""
+        with Session(self.engine) as s, s.begin():
+            t = s.execute(select(ToolToken).where(ToolToken.tenant == tenant, ToolToken.tool == tool,
+                                                  ToolToken.user == user)).scalar_one_or_none()
+            if t is None:
+                t = ToolToken(tenant=tenant, tool=tool, user=user, access=access)
+                s.add(t)
+            t.access, t.expires, t.scope, t.updated = access, expires, scope[:512], now()
+            if refresh is not None:
+                t.refresh = refresh
+
+    def delete_token(self, tenant: str, tool: str, user: str) -> int:
+        with Session(self.engine) as s, s.begin():
+            return s.execute(delete(ToolToken).where(ToolToken.tenant == tenant, ToolToken.tool == tool,
+                                                     ToolToken.user == user)).rowcount or 0
+
+    def connected_users(self, tenant: str, tool: str) -> int:
+        with Session(self.engine) as s:
+            return len(list(s.execute(select(ToolToken.id).where(ToolToken.tenant == tenant,
+                                                                 ToolToken.tool == tool)).scalars()))
+
+    def add_pending(self, *, state: str, tenant: str, tool: str, user: str, verifier: str, back: str) -> None:
+        with Session(self.engine) as s, s.begin():
+            s.execute(delete(OAuthPending).where(OAuthPending.created < now() - timedelta(minutes=10)))
+            s.add(OAuthPending(state=state, tenant=tenant, tool=tool, user=user, verifier=verifier, back=back[:512]))
+
+    def pop_pending(self, state: str) -> OAuthPending | None:
+        """The sign-in for this state, once: it is removed, and one older than ten minutes doesn't count."""
+        with Session(self.engine) as s, s.begin():
+            p = s.get(OAuthPending, state)
+            if p is None:
+                return None
+            s.delete(p)
+            created = p.created if p.created.tzinfo else p.created.replace(tzinfo=UTC)
+            s.flush()
+            s.expunge(p)
+            return p if created > now() - timedelta(minutes=10) else None
 
     def list_tools(self) -> list[Tool]:
         with Session(self.engine) as s:

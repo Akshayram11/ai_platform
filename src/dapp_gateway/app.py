@@ -144,7 +144,8 @@ PERSONAL = "user:"  # app name of a personal key; ':' can't appear in a DataOS a
 
 def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
                upstream_transport: httpx.AsyncBaseTransport | None = None,
-               dataos_transport: httpx.BaseTransport | None = None, vault: Vault | None = None) -> FastAPI:
+               dataos_transport: httpx.BaseTransport | None = None, vault: Vault | None = None,
+               oauth_transport: httpx.BaseTransport | None = None) -> FastAPI:
     fqdn = os.environ.get("DATAOS_FQDN", "")
     store = store or Store()
     heimdall = heimdall or (Heimdall(f"https://{fqdn}") if fqdn else None)
@@ -593,7 +594,8 @@ def create_app(store: Store | None = None, heimdall: Heimdall | None = None,
         return await proxy("openai", path, request, key)
 
     mount_tools(api, store=store, heimdall=heimdall, caller=caller, admins=admins, upstream=upstream,
-                clean_user=clean_user, vault=vault)
+                clean_user=clean_user, vault=vault,
+                oauth_http=httpx.Client(timeout=httpx.Timeout(20, connect=5), transport=oauth_transport))
 
     @api.exception_handler(HTTPException)
     async def _http_exc(_: Request, exc: HTTPException) -> JSONResponse:

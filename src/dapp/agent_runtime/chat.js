@@ -1,3 +1,20 @@
+// Shows text in an element; a web address in it becomes a link (an error can say "connect the tool here").
+function agentText(element, text) {
+  element.replaceChildren();
+  for (const part of String(text).split(/(https?:\/\/[^\s]+)/)) {
+    if (/^https?:\/\//.test(part)) {
+      const link = document.createElement("a");
+      link.href = part.replace(/[.,)]+$/, "");
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = part.replace(/[.,)]+$/, "");
+      element.append(link, part.slice(link.textContent.length));
+    } else if (part) {
+      element.append(part);
+    }
+  }
+}
+
 function setupAgentChat(panel, send) {
   const form = panel.querySelector("form");
   const input = form.elements.message;
@@ -61,7 +78,7 @@ function setupAgentChat(panel, send) {
       status.textContent = "";
     } catch (error) {
       if (controller.signal.aborted) return;
-      status.textContent = error.message;
+      agentText(status, error.message);
       input.value = content;
     } finally {
       if (pending === controller) {

@@ -224,6 +224,21 @@ class GatewayUsage:
     def tool_access(self, tenant: str, name: str, allow: list[str], deny: list[str]) -> dict[str, Any]:
         return self._tool_call("POST", f"/admin/tools/{tenant}/{name}/access", json={"allow": allow, "deny": deny})
 
+    # tools that ask each person to sign in (OAuth): the owner sets it up once, everyone connects their own account
+    def oauth_setup(self, tenant: str, name: str, redirect_uri: str, *, client_id: str = "", client_secret: str = "",
+                    scope: str | None = None) -> dict[str, Any]:
+        body = {"redirect_uri": redirect_uri, "client_id": client_id, "client_secret": client_secret, "scope": scope}
+        return self._tool_call("POST", f"/admin/tools/{tenant}/{name}/oauth/setup", json=body)
+
+    def oauth_start(self, tenant: str, name: str, back: str = "") -> dict[str, Any]:
+        return self._tool_call("POST", f"/admin/tools/{tenant}/{name}/oauth/start", json={"back": back})
+
+    def oauth_finish(self, state: str, code: str) -> dict[str, Any]:
+        return self._tool_call("POST", "/admin/oauth/finish", json={"state": state, "code": code})
+
+    def oauth_disconnect(self, tenant: str, name: str) -> dict[str, Any]:
+        return self._tool_call("DELETE", f"/admin/tools/{tenant}/{name}/oauth/me")
+
     def tool_usage(self, *, tool: str | None, tenant: str | None, since_hours: int, group_by: str) -> dict[str, Any]:
         params: dict[str, Any] = {"since_hours": since_hours, "group_by": group_by}
         params.update({k: v for k, v in (("tool", tool), ("tenant", tenant)) if v})

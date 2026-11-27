@@ -32,15 +32,16 @@ the gateway checks who they are, adds the tool's own credential (nobody else eve
         data-header="{{ p.auth_header }}" data-hint="{{ p.hint }}"> <b>{{ p.title }}</b> <span class="muted">{{ p.description }}</span></label>
       {% endfor %}
       <label><input type="radio" name="kind" value="" checked> <b>Custom MCP server</b> <span class="muted">any MCP server that speaks Streamable HTTP</span></label>
-      <p class="muted">dapp-monitor and immortal-obj come with the platform. MCP servers that need you to sign in (OAuth,
-        like Notion) come later; for now use one that takes a key or token.</p>
+      <p class="muted">dapp-monitor and immortal-obj come with the platform. For a server that asks you to sign in (OAuth,
+        like Notion), enter only its URL and leave the key empty: the dashboard finds out and sends you to sign in.
+        Everyone who then uses the tool connects their own account.</p>
     </fieldset>
     <div class="tool-grid">
       <label>Name<input name="name" required pattern="[a-z0-9][a-z0-9-]{0,47}" placeholder="jira" title="lower-case letters, digits and -"></label>
       <label>MCP server URL<input name="url" required type="url" placeholder="https://mcp.example.com/mcp"></label>
       <label class="wide">What it does<input name="description" maxlength="512" placeholder="Read and create Jira tickets"></label>
       <label>Header<input name="auth_header" value="Authorization" placeholder="Authorization"></label>
-      <label>Key or token<input name="auth_value" type="password" placeholder="optional; a bare token is sent as Bearer"></label>
+      <label>Key or token<input name="auth_value" type="password" placeholder="empty: the server asks each person to sign in, if it can"></label>
     </div>
     <p class="muted" id="tool-hint">The key is stored encrypted in the gateway. Nobody who uses the tool ever sees it, including agents.</p>
     <label class="inline-check"><input type="checkbox" name="everyone" value="1"> Anyone signed in to DataOS may use it (otherwise only you, until you allow people or apps below)</label>
@@ -76,16 +77,30 @@ dapp tool connect NAME              # add it to Claude Code</pre></div></div>
 {% for t in tools %}
 <div class="panel">
   <div class="row" style="justify-content:space-between;align-items:center">
-    <div><b>{{ t.name }}</b> <span class="muted">· owner {{ t.owner }}{% if t.has_auth %} · credential stored{% endif %}</span>
+    <div><b>{{ t.name }}</b> <span class="muted">· owner {{ t.owner }}{% if t.auth_mode == 'oauth' %} · each person signs in{% elif t.has_auth %} · credential stored{% endif %}</span>
       <div class="muted">{{ t.description }}</div></div>
     {% if t.mine %}<span class="pill ok">yours</span>{% else %}<span class="pill">shared with you</span>{% endif %}
   </div>
   <p class="muted" style="margin:10px 0 4px">Use it in Claude Code:</p>
   <pre>dapp tool connect {{ t.name }}</pre>
+  {% if t.auth_mode == 'oauth' %}
+  <div class="row oauth-row{% if connect == t.name %} oauth-focus{% endif %}" id="tool-{{ t.name }}" style="margin-top:10px;align-items:center">
+    {% if t.connected %}<span class="pill ok">Connected as you</span>
+    <form class="inline" method="post" action="{{ root }}/tools/{{ t.name }}/disconnect">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}"><button>Disconnect</button></form>
+    {% else %}<span class="pill warn">You have not connected it</span>
+    <form class="inline" method="post" action="{{ root }}/tools/{{ t.name }}/connect">
+      <input type="hidden" name="csrf" value="{{ s.csrf }}"><input type="hidden" name="return" value="/tools">
+      <button class="primary">Sign in to {{ t.name }}</button></form>{% endif %}
+    <span class="muted">Each person signs in with their own account: the tool sees who is asking, and agents never see the token.
+      {% if t.connected_users is defined %}{{ t.connected_users }} {{ 'person has' if t.connected_users == 1 else 'people have' }} connected.{% endif %}</span>
+  </div>
+  {% else %}
   <form class="inline" method="post" action="{{ root }}/tools/{{ t.name }}/check" style="margin-top:8px">
     <input type="hidden" name="csrf" value="{{ s.csrf }}"><button>Check connection</button></form>
+  {% endif %}
   {% if t.mine %}
-  <p class="muted" style="margin:10px 0 4px">Upstream: <code>{{ t.url }}</code>{% if t.auth_header %} · key sent in <code>{{ t.auth_header }}</code>{% endif %}</p>
+  <p class="muted" style="margin:10px 0 4px">Upstream: <code>{{ t.url }}</code>{% if t.auth_mode != 'oauth' and t.auth_header %} · key sent in <code>{{ t.auth_header }}</code>{% endif %}</p>
   <details style="margin-top:8px"><summary class="muted">Edit URL, description or key</summary>
     <form method="post" action="{{ root }}/tools/{{ t.name }}/edit" class="tool-form" autocomplete="off">
       <input type="hidden" name="csrf" value="{{ s.csrf }}">
@@ -93,7 +108,7 @@ dapp tool connect NAME              # add it to Claude Code</pre></div></div>
         <label>MCP server URL<input name="url" required type="url" value="{{ t.url }}"></label>
         <label class="wide">What it does<input name="description" maxlength="512" value="{{ t.description }}"></label>
         <label>Header<input name="auth_header" value="{{ t.auth_header or 'Authorization' }}"></label>
-        <label>New key or token<input name="auth_value" type="password" placeholder="{{ 'empty keeps the stored one' if t.has_auth else 'optional' }}"></label>
+        <label>New key or token<input name="auth_value" type="password" placeholder="{{ 'a key here replaces sign-in with one key for everyone' if t.auth_mode == 'oauth' else ('empty keeps the stored one' if t.has_auth else 'optional') }}"></label>
       </div>
       {% if t.has_auth %}<label class="inline-check"><input type="checkbox" name="remove_credential" value="1"> Remove the stored key</label>{% endif %}
       <div class="row"><button class="primary">Save and check</button></div>
@@ -151,4 +166,5 @@ dapp tool connect NAME              # add it to Claude Code</pre></div></div>
 {% endif %}
 {% endif %}
 {% endif %}
+<script>document.querySelector('.oauth-focus')?.scrollIntoView({block: 'center'});</script>
 {% endblock %}

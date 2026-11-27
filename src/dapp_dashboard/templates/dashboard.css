@@ -382,3 +382,5 @@ details#add-tool[open]>summary{margin-bottom:14px}
 a.button{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:8px;padding:7px 14px;color:var(--ink)}
 a.button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
 @media (max-width:640px){.tool-grid{grid-template-columns:minmax(0,1fr)}}
+
+.oauth-row.oauth-focus{outline:2px solid var(--primary);outline-offset:6px;border-radius:8px}
